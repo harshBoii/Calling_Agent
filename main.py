@@ -83,8 +83,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             channels       = 1,
             punctuate      = True,
             interim_results= True,
-            endpointing    = 300,
-            utterance_end_ms = 1000,
+            endpointing      = "300",    # string, not int
+            utterance_end_ms = "1000",   # ← string, not int
         ) as connection:
             ready = threading.Event()
 
@@ -105,12 +105,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         label    = "FINAL" if is_final else "interim"
                         print(f"[{call_sid}] [{label}] {transcript}")
 
-                        # TODO next step: on is_final → send to Groq
+                        # next step: on is_final → send to Groq
 
                     speech_final = getattr(result, "speech_final", False)
                     if speech_final:
                         print(f"[{call_sid}] UtteranceEnd → human turn complete")
-                        # TODO next step: trigger Groq LLM here
+                        # next step: trigger Groq LLM here
 
                 except Exception as e:
                     print(f"[{call_sid}] Transcript parse error: {e}")
