@@ -52,9 +52,9 @@ DEFAULT_LLM_PROVIDER = "groq"   # groq | openai | claude | gemini
 
 DEFAULT_LLM_MODELS = {
     "groq":   "llama-3.3-70b-versatile",
-    "openai": "gpt-4o",
-    "claude": "claude-3-5-haiku-20241022",   # fastest Claude model
-    "gemini": "gemini-2.0-flash",
+    "openai": "gpt-5.4-nano",
+    "claude": "claude-haiku-4-5-20251001",  
+    "gemini": "gemini-3-flash-preview",
 }
 
 # ─── Deepgram ─────────────────────────────────────────────────────────────────
