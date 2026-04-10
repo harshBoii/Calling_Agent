@@ -78,7 +78,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         """Runs entirely in a background thread — matches the user's working pattern."""
         with dg_client.listen.v1.connect(
             model          = "nova-3",
-            encoding       = "mulaw",
+            encoding       = "linear16",
             sample_rate    = 8000,
             channels       = 1,
             punctuate      = True,
