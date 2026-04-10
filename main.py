@@ -169,7 +169,6 @@ async def ask_llm(
                 model       = model,
                 messages    = [{"role": "system", "content": system_prompt}] + conversation_history,
                 temperature = 0.7,
-                max_tokens  = 150,
             )
             return response.choices[0].message.content.strip()
 
