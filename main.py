@@ -3,6 +3,7 @@ import json
 import base64
 import asyncio
 import audioop
+import uuid
 import websockets
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
@@ -24,10 +25,10 @@ ELEVENLABS_API_KEY   = os.environ["ELEVENLABS_API_KEY"]
 ELEVENLABS_VOICE_ID  = os.environ["ELEVENLABS_VOICE_ID"]
 
 app           = FastAPI()
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-groq_client   = AsyncGroq(api_key=GROQ_API_KEY)
 
-DEEPGRAM_URL = (
+LANGUAGE = "English"
+
+DEEPGRAM_URL_BASE = (
     "wss://api.deepgram.com/v1/listen"
     "?model=nova-3"
     "&encoding=mulaw"
@@ -37,6 +38,7 @@ DEEPGRAM_URL = (
     "&interim_results=true"
     "&endpointing=300"
     "&utterance_end_ms=1000"
+    "&language="
 )
 
 ELEVENLABS_URL = (
@@ -44,21 +46,98 @@ ELEVENLABS_URL = (
     "/stream"
     "?output_format=pcm_8000"
 )
+ELEVENLABS_MODEL = "eleven_multilingual_v2"
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+groq_client   = AsyncGroq(api_key=GROQ_API_KEY)
+
+# Outbound call configs: cfg_token (TwiML query) → dict; then CallSid → dict
+pending_call_configs: dict[str, dict] = {}
+call_configs_by_sid: dict[str, dict] = {}
+
 
 # ─── EDIT THIS to change the agent's persona and goal ───────────────────────
-SYSTEM_PROMPT = """You are Samaira, a friendly and professional AI assistant
-making a phone call on behalf of Immortell Company, to sell GEO optimization services.
+
+NAME = "Samaaira"
+COMPANY = "Immortell Company"
+PRODUCT = "GEO optimization services"
+PERKS_OF_PRODUCT = "10% off on the first month "
+
+SYSTEM_PROMPT_TEMPLATE = """You are {NAME}, a friendly and professional AI assistant
+making a phone call on behalf of {COMPANY}, to sell {PRODUCT} with {PERKS_OF_PRODUCT}.
 
 Keep responses:
 - Short and conversational (1-3 sentences max)
 - Natural sounding — this is a phone call, not an essay
 - Focused on the goal of the call
+- Use {LANGUAGE} language for the conversation.
 
 If asked something you don't know, politely say you'll follow up via message
 Never say you are an AI."""
 
-# # ─── EDIT THIS to change the opening greeting ────────────────────────────────
-OPENING_GREETING = "Hello, this is Samaira. I Called You On Behalf Of Immortell Company , are you looking for GEO optimization services?"
+OPENING_GREETING_TEMPLATE = (
+    "Hello, this is {NAME}. I Called You On Behalf Of {COMPANY} , are you looking for "
+    "{PRODUCT} with {PERKS_OF_PRODUCT}?"
+)
+
+
+def _format_vars(
+    *,
+    language: str,
+    name: str,
+    company: str,
+    product: str,
+    perks_of_product: str,
+) -> dict:
+    return {
+        "LANGUAGE": language,
+        "NAME": name,
+        "COMPANY": company,
+        "PRODUCT": product,
+        "PERKS_OF_PRODUCT": perks_of_product,
+    }
+
+
+def build_call_config(body: dict | None) -> dict:
+    """Merge POST body overrides with module defaults."""
+    b = body or {}
+    language = b.get("language", LANGUAGE)
+    deepgram_language = b.get("deepgram_language", "en")
+    elevenlabs_model = b.get("elevenlabs_model", ELEVENLABS_MODEL)
+    name = b.get("name", NAME)
+    company = b.get("company", COMPANY)
+    product = b.get("product", PRODUCT)
+    perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
+    ctx = _format_vars(
+        language=language,
+        name=name,
+        company=company,
+        product=product,
+        perks_of_product=perks,
+    )
+    if b.get("system_prompt") is not None:
+        system_prompt = b["system_prompt"]
+    else:
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+    if b.get("opening_greeting") is not None:
+        opening_greeting = b["opening_greeting"]
+    else:
+        opening_greeting = OPENING_GREETING_TEMPLATE.format(**ctx)
+    return {
+        "language": language,
+        "deepgram_language": deepgram_language,
+        "elevenlabs_model": elevenlabs_model,
+        "name": name,
+        "company": company,
+        "product": product,
+        "perks_of_product": perks,
+        "system_prompt": system_prompt,
+        "opening_greeting": opening_greeting,
+    }
+
+
+def deepgram_ws_url(deepgram_language: str) -> str:
+    return DEEPGRAM_URL_BASE + deepgram_language
 
 
 # # ─── EDIT THIS to change the agent's persona and goal ───────────────────────
@@ -82,11 +161,11 @@ MIN_WORDS_TO_RESPOND = 3
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def ask_groq(conversation_history: list) -> str:
+async def ask_groq(conversation_history: list, system_prompt: str) -> str:
     try:
         response = await groq_client.chat.completions.create(
             model       = "llama-3.3-70b-versatile",
-            messages    = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history,
+            messages    = [{"role": "system", "content": system_prompt}] + conversation_history,
             temperature = 0.7,
             max_tokens  = 150,
         )
@@ -96,7 +175,7 @@ async def ask_groq(conversation_history: list) -> str:
         return "Sorry, give me just a moment."
 
 
-async def text_to_mulaw_chunks(text: str):
+async def text_to_mulaw_chunks(text: str, model_id: str):
     """Stream PCM from ElevenLabs, convert to mulaw, yield base64 chunks."""
     headers = {
         "xi-api-key":   ELEVENLABS_API_KEY,
@@ -104,7 +183,7 @@ async def text_to_mulaw_chunks(text: str):
     }
     payload = {
         "text":     text,
-        "model_id": "eleven_multilingual_v2",
+        "model_id": model_id,
         "voice_settings": {
             "stability":         0.4,
             "similarity_boost":  0.8,
@@ -136,10 +215,15 @@ async def make_outbound_call(request: Request):
     to_number = body.get("to")
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
+    # Optional agent params (see build_call_config); strip `to` before merging
+    cfg_body = {k: v for k, v in body.items() if k != "to"}
+    cfg      = build_call_config(cfg_body)
+    cfg_token = str(uuid.uuid4())
+    pending_call_configs[cfg_token] = cfg
     call = twilio_client.calls.create(
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
-        url=f"{PUBLIC_BASE_URL}/voice/incoming",
+        url=f"{PUBLIC_BASE_URL}/voice/incoming?cfg={cfg_token}",
         method="POST"
     )
     return {"call_sid": call.sid, "status": call.status}
@@ -151,6 +235,9 @@ async def incoming_call(request: Request):
     params   = dict(form)
     call_sid = params.get("CallSid", "unknown")
     caller   = params.get("From", "unknown")
+    cfg_token = request.query_params.get("cfg")
+    if cfg_token and cfg_token in pending_call_configs:
+        call_configs_by_sid[call_sid] = pending_call_configs.pop(cfg_token)
     print(f"[{call_sid}] Incoming call from {caller}", flush=True)
 
     ws_base    = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -168,6 +255,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     print(f"[{call_sid}] Twilio WebSocket connected", flush=True)
 
+    call_cfg = call_configs_by_sid.pop(call_sid, None) or build_call_config(None)
+    system_prompt = call_cfg["system_prompt"]
+    opening_greeting = call_cfg["opening_greeting"]
+    elevenlabs_model = call_cfg["elevenlabs_model"]
+    dg_url = deepgram_ws_url(call_cfg["deepgram_language"])
+
     audio_queue          = asyncio.Queue()
     conversation_history = []
     transcript_buffer    = []
@@ -182,7 +275,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         agent_speaking = True
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
-        async for mulaw_b64 in text_to_mulaw_chunks(text):
+        async for mulaw_b64 in text_to_mulaw_chunks(text, elevenlabs_model):
             # FIX 3 — if human interrupted, stop sending immediately
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
@@ -229,9 +322,9 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                     # FIX 1 — Agent speaks first immediately on call connect
                     conversation_history.append({
                         "role": "assistant",
-                        "content": OPENING_GREETING
+                        "content": opening_greeting
                     })
-                    asyncio.create_task(send_audio_to_twilio(OPENING_GREETING))
+                    asyncio.create_task(send_audio_to_twilio(opening_greeting))
 
                 elif event == "media":
                     chunk = base64.b64decode(data["media"]["payload"])
@@ -256,7 +349,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
             async with websockets.connect(
-                DEEPGRAM_URL,
+                dg_url,
                 additional_headers=headers,
                 ping_interval=5,
                 ping_timeout=20,
@@ -320,7 +413,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
                                 conversation_history.append({"role": "user", "content": full_turn})
 
-                                agent_reply = await ask_groq(conversation_history)
+                                agent_reply = await ask_groq(conversation_history, system_prompt)
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
                                 print(f"[{call_sid}] 🤖 Agent: {agent_reply}", flush=True)
 
