@@ -19,7 +19,7 @@ PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
 
 app = FastAPI()
-validator       = RequestValidator(TWILIO_AUTH_TOKEN)
+# validator       = RequestValidator(TWILIO_AUTH_TOKEN)
 twilio_client   = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
 
