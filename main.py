@@ -42,10 +42,11 @@ DEEPGRAM_URL = (
 ELEVENLABS_URL = (
     f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
     "/stream"
-    "?output_format=pcm_8000"   # 8kHz PCM → we convert to mulaw for Twilio
+    "?output_format=pcm_8000"
 )
 
-SYSTEM_PROMPT = """You are Aryan, a friendly and professional AI assistant 
+# ─── EDIT THIS to change the agent's persona and goal ───────────────────────
+SYSTEM_PROMPT = """You are Aryan, a friendly and professional AI assistant
 making a phone call on behalf of your user.
 
 Keep responses:
@@ -55,6 +56,13 @@ Keep responses:
 
 If asked something you don't know, politely say you'll follow up via message.
 Never say you are an AI unless directly asked."""
+
+# ─── EDIT THIS to change the opening greeting ────────────────────────────────
+OPENING_GREETING = "Hi there! I'm Aryan. How can I help you today?"
+
+# Minimum word count to trigger a Groq response — filters "Yeah", "And", "Hmm"
+MIN_WORDS_TO_RESPOND = 3
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def ask_groq(conversation_history: list) -> str:
@@ -72,36 +80,30 @@ async def ask_groq(conversation_history: list) -> str:
 
 
 async def text_to_mulaw_chunks(text: str):
-    """
-    Stream PCM audio from ElevenLabs, convert each chunk to mulaw 8kHz,
-    yield base64-encoded mulaw chunks ready for Twilio.
-    """
+    """Stream PCM from ElevenLabs, convert to mulaw, yield base64 chunks."""
     headers = {
         "xi-api-key":   ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
     }
     payload = {
-        "text":       text,
-        "model_id":   "eleven_turbo_v2_5",   # lowest latency ElevenLabs model
+        "text":     text,
+        "model_id": "eleven_turbo_v2_5",
         "voice_settings": {
-            "stability":        0.4,
-            "similarity_boost": 0.8,
-            "style":            0.0,
+            "stability":         0.4,
+            "similarity_boost":  0.8,
+            "style":             0.0,
             "use_speaker_boost": True,
         },
     }
-
     async with httpx.AsyncClient(timeout=30) as client:
         async with client.stream("POST", ELEVENLABS_URL, headers=headers, json=payload) as response:
             if response.status_code != 200:
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
                 return
-
             async for pcm_chunk in response.aiter_bytes(chunk_size=320):
                 if not pcm_chunk:
                     continue
-                # PCM 16-bit 8kHz → mulaw 8kHz (Twilio's required format)
                 mulaw_chunk = audioop.lin2ulaw(pcm_chunk, 2)
                 yield base64.b64encode(mulaw_chunk).decode("utf-8")
 
@@ -154,11 +156,20 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     transcript_buffer    = []
     stream_sid           = None
 
+    # FIX 3 — track whether agent is currently speaking so we can interrupt
+    agent_speaking = False
+
     async def send_audio_to_twilio(text: str):
-        """Convert text → ElevenLabs PCM → mulaw → send over Twilio WebSocket."""
-        print(f"[{call_sid}] 🔊 Sending to ElevenLabs: {text[:60]}...", flush=True)
+        """TTS → mulaw → Twilio WebSocket. Sets agent_speaking flag."""
+        nonlocal agent_speaking
+        agent_speaking = True
+        print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
         async for mulaw_b64 in text_to_mulaw_chunks(text):
+            # FIX 3 — if human interrupted, stop sending immediately
+            if not agent_speaking:
+                print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
+                break
             try:
                 await websocket.send_text(json.dumps({
                     "event":     "media",
@@ -167,15 +178,21 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 }))
                 chunk_count += 1
             except Exception as e:
-                print(f"[{call_sid}] WebSocket send error: {e}", flush=True)
+                print(f"[{call_sid}] Send error: {e}", flush=True)
                 break
-        # Tell Twilio we're done sending this response
-        await websocket.send_text(json.dumps({
-            "event":     "mark",
-            "streamSid": stream_sid,
-            "mark":      {"name": "agent_done"}
-        }))
-        print(f"[{call_sid}] ✅ Sent {chunk_count} audio chunks to Twilio", flush=True)
+
+        # Mark end of agent speech
+        try:
+            await websocket.send_text(json.dumps({
+                "event":     "mark",
+                "streamSid": stream_sid,
+                "mark":      {"name": "agent_done"}
+            }))
+        except Exception:
+            pass
+
+        agent_speaking = False
+        print(f"[{call_sid}] ✅ Sent {chunk_count} chunks", flush=True)
 
     async def receive_from_twilio():
         nonlocal stream_sid
@@ -187,17 +204,29 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
                 if event == "connected":
                     print(f"[{call_sid}] Twilio connected", flush=True)
+
                 elif event == "start":
                     stream_sid = data["start"]["streamSid"]
                     print(f"[{call_sid}] Stream started → {stream_sid}", flush=True)
+
+                    # FIX 1 — Agent speaks first immediately on call connect
+                    conversation_history.append({
+                        "role": "assistant",
+                        "content": OPENING_GREETING
+                    })
+                    asyncio.create_task(send_audio_to_twilio(OPENING_GREETING))
+
                 elif event == "media":
                     chunk = base64.b64decode(data["media"]["payload"])
                     await audio_queue.put(chunk)
+
                 elif event == "mark":
-                    print(f"[{call_sid}] Mark received: {data['mark']['name']}", flush=True)
+                    print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
+
                 elif event == "stop":
                     print(f"[{call_sid}] Stream stopped", flush=True)
                     break
+
         except WebSocketDisconnect:
             print(f"[{call_sid}] Twilio disconnected", flush=True)
         except Exception as e:
@@ -206,6 +235,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             await audio_queue.put(None)
 
     async def stream_to_deepgram():
+        nonlocal agent_speaking
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
             async with websockets.connect(
@@ -228,6 +258,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         await dg_ws.send(chunk)
 
                 async def receive_transcripts():
+                    nonlocal agent_speaking
                     async for raw_msg in dg_ws:
                         try:
                             msg = json.loads(raw_msg)
@@ -242,6 +273,18 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                             is_final     = msg.get("is_final", False)
                             speech_final = msg.get("speech_final", False)
 
+                            # FIX 3 — Human started speaking → clear Twilio audio buffer
+                            if agent_speaking:
+                                agent_speaking = False
+                                print(f"[{call_sid}] ⚡ Human interrupted agent", flush=True)
+                                try:
+                                    await websocket.send_text(json.dumps({
+                                        "event":     "clear",
+                                        "streamSid": stream_sid
+                                    }))
+                                except Exception:
+                                    pass
+
                             if is_final:
                                 label = "FINAL ✅" if speech_final else "FINAL"
                                 print(f"[{call_sid}] [{label}] {transcript}", flush=True)
@@ -251,15 +294,19 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 full_turn = " ".join(transcript_buffer)
                                 transcript_buffer.clear()
 
+                                # FIX 2 — ignore short filler words
+                                word_count = len(full_turn.split())
+                                if word_count < MIN_WORDS_TO_RESPOND:
+                                    print(f"[{call_sid}] ⏭ Skipping short turn ({word_count} words): '{full_turn}'", flush=True)
+                                    continue
+
                                 print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
                                 conversation_history.append({"role": "user", "content": full_turn})
 
-                                # Groq → reply text
                                 agent_reply = await ask_groq(conversation_history)
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
                                 print(f"[{call_sid}] 🤖 Agent: {agent_reply}", flush=True)
 
-                                # ElevenLabs → audio → Twilio
                                 await send_audio_to_twilio(agent_reply)
 
                         except Exception as e:
