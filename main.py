@@ -74,26 +74,22 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
     dg_connection = deepgram_client.listen.asyncwebsocket.v("1")
 
-    # ✅ No 'self' parameter — this is the correct v3 signature
-    async def on_transcript(result, **kwargs):
+    # ✅ self is REQUIRED as first param — Deepgram SDK injects it
+    async def on_transcript(self, result, **kwargs):
         try:
             alt        = result.channel.alternatives[0]
             transcript = alt.transcript.strip()
-
             if not transcript:
                 return
-
-            is_final = result.is_final
-            label    = "FINAL" if is_final else "interim"
+            label = "FINAL" if result.is_final else "interim"
             print(f"[{call_sid}] [{label}] {transcript}")
-
         except Exception as e:
             print(f"[{call_sid}] Transcript parse error: {e}")
 
-    async def on_utterance_end(utterance_end, **kwargs):
+    async def on_utterance_end(self, utterance_end, **kwargs):
         print(f"[{call_sid}] UtteranceEnd → human finished speaking")
 
-    async def on_error(error, **kwargs):
+    async def on_error(self, error, **kwargs):
         print(f"[{call_sid}] Deepgram error: {error}")
 
     dg_connection.on(LiveTranscriptionEvents.Transcript,   on_transcript)
@@ -130,14 +126,11 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
             elif event == "start":
                 stream_sid = data["start"]["streamSid"]
-                print(f"[{call_sid}] Stream started → streamSid={stream_sid}")
+                print(f"[{call_sid}] Stream started → {stream_sid}")
 
             elif event == "media":
                 audio_bytes = base64.b64decode(data["media"]["payload"])
                 await dg_connection.send(audio_bytes)
-
-            elif event == "mark":
-                print(f"[{call_sid}] Mark: {data['mark']['name']}")
 
             elif event == "stop":
                 print(f"[{call_sid}] Stream stopped")
@@ -146,8 +139,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     except WebSocketDisconnect:
         print(f"[{call_sid}] WebSocket disconnected")
     except Exception as e:
-        # ✅ Suppress the noisy 'tasks cancelled' error from Deepgram SDK internals
-        if "tasks cancelled" not in str(e).lower() and "cancel" not in str(e).lower():
+        if "cancel" not in str(e).lower():
             print(f"[{call_sid}] Error: {e}")
     finally:
         try:
