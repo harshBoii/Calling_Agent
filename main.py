@@ -61,10 +61,11 @@ call_configs_by_sid: dict[str, dict] = {}
 NAME = "Samaaira"
 COMPANY = "Immortell Company"
 PRODUCT = "GEO optimization services"
-PERKS_OF_PRODUCT = "10% off on the first month "
+PERKS_OF_PRODUCT = "10% off on the first month"
+INFO_ABOUT_LEAD = "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
 
-SYSTEM_PROMPT_TEMPLATE = """You are {NAME}, a friendly and professional AI assistant
-making a phone call on behalf of {COMPANY}, to sell {PRODUCT} with {PERKS_OF_PRODUCT}.
+SYSTEM_PROMPT_TEMPLATE = """You are Samaira, you have to talk to {NAME}  , You should know about lead that {INFO_ABOUT_LEAD} , behave like a friendly and professional AI assistant
+making a phone call on behalf of {COMPANY}, to sell {PRODUCT} with {PERKS_OF_PRODUCT} and leverage the information about the lead to sell the product.
 
 Keep responses:
 - Short and conversational (1-3 sentences max)
@@ -88,6 +89,7 @@ def _format_vars(
     company: str,
     product: str,
     perks_of_product: str,
+    info_about_lead: str,
 ) -> dict:
     return {
         "LANGUAGE": language,
@@ -95,6 +97,7 @@ def _format_vars(
         "COMPANY": company,
         "PRODUCT": product,
         "PERKS_OF_PRODUCT": perks_of_product,
+        "INFO_ABOUT_LEAD": info_about_lead,
     }
 
 
@@ -108,12 +111,14 @@ def build_call_config(body: dict | None) -> dict:
     company = b.get("company", COMPANY)
     product = b.get("product", PRODUCT)
     perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
+    lead_info = b.get("info_about_lead", INFO_ABOUT_LEAD)
     ctx = _format_vars(
         language=language,
         name=name,
         company=company,
         product=product,
         perks_of_product=perks,
+        info_about_lead=lead_info,
     )
     if b.get("system_prompt") is not None:
         system_prompt = b["system_prompt"]
@@ -131,6 +136,7 @@ def build_call_config(body: dict | None) -> dict:
         "company": company,
         "product": product,
         "perks_of_product": perks,
+        "info_about_lead": lead_info,
         "system_prompt": system_prompt,
         "opening_greeting": opening_greeting,
     }

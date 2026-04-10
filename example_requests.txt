@@ -1,0 +1,13 @@
+curl -sS -X POST 'https://calling-agent-ki3j.onrender.com/call/outbound' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "+918102244713",
+    "language": "English",
+    "deepgram_language": "en",
+    "elevenlabs_model": "eleven_multilingual_v2",
+    "name": "Samaira",
+    "company": "Immortell Company",
+    "product": "GEO optimization services",
+    "perks_of_product": "10% off on the first month"
+    "info_about_lead": "They run a small bakery and asked about local SEO last week."
+  }'
