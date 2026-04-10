@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
 from groq import AsyncGroq
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,14 +42,18 @@ DEEPGRAM_URL_BASE = (
     "&language="
 )
 
-ELEVENLABS_URL = (
-    f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
-    "/stream"
-    "?output_format=pcm_8000"
-)
+ELEVENLABS_STREAM_PATH = "/stream?output_format=pcm_8000"
+
+
+def elevenlabs_stream_url(voice_id: str) -> str:
+    return f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}{ELEVENLABS_STREAM_PATH}"
+
+
 ELEVENLABS_MODEL = "eleven_multilingual_v2"
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+
 groq_client   = AsyncGroq(api_key=GROQ_API_KEY)
 
 # Outbound call configs: cfg_token (TwiML query) → dict; then CallSid → dict
@@ -112,6 +117,7 @@ def build_call_config(body: dict | None) -> dict:
     product = b.get("product", PRODUCT)
     perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
     lead_info = b.get("info_about_lead", INFO_ABOUT_LEAD)
+    voice_id = b.get("voice_id") or b.get("voiceId") or ELEVENLABS_VOICE_ID
     ctx = _format_vars(
         language=language,
         name=name,
@@ -132,6 +138,7 @@ def build_call_config(body: dict | None) -> dict:
         "language": language,
         "deepgram_language": deepgram_language,
         "elevenlabs_model": elevenlabs_model,
+        "voice_id": voice_id,
         "name": name,
         "company": company,
         "product": product,
@@ -181,7 +188,7 @@ async def ask_groq(conversation_history: list, system_prompt: str) -> str:
         return "Sorry, give me just a moment."
 
 
-async def text_to_mulaw_chunks(text: str, model_id: str):
+async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
     """Stream PCM from ElevenLabs, convert to mulaw, yield base64 chunks."""
     headers = {
         "xi-api-key":   ELEVENLABS_API_KEY,
@@ -197,8 +204,9 @@ async def text_to_mulaw_chunks(text: str, model_id: str):
             "use_speaker_boost": True,
         },
     }
+    url = elevenlabs_stream_url(voice_id)
     async with httpx.AsyncClient(timeout=30) as client:
-        async with client.stream("POST", ELEVENLABS_URL, headers=headers, json=payload) as response:
+        async with client.stream("POST", url, headers=headers, json=payload) as response:
             if response.status_code != 200:
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
@@ -265,6 +273,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     system_prompt = call_cfg["system_prompt"]
     opening_greeting = call_cfg["opening_greeting"]
     elevenlabs_model = call_cfg["elevenlabs_model"]
+    voice_id = call_cfg["voice_id"]
     dg_url = deepgram_ws_url(call_cfg["deepgram_language"])
 
     audio_queue          = asyncio.Queue()
@@ -281,7 +290,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         agent_speaking = True
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
-        async for mulaw_b64 in text_to_mulaw_chunks(text, elevenlabs_model):
+        async for mulaw_b64 in text_to_mulaw_chunks(text, elevenlabs_model, voice_id):
             # FIX 3 — if human interrupted, stop sending immediately
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
