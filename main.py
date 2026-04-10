@@ -38,7 +38,7 @@ async def health():
 
 @app.post("/voice/incoming")
 async def incoming_call(request: Request):
-    # params = await validate_twilio_signature(request)
+    params = await validate_twilio_signature(request)
 
     call_sid = params.get("CallSid", "unknown")
     caller   = params.get("From", "unknown")
