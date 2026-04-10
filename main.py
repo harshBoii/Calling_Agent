@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPExcept
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
+from groq import AsyncGroq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,9 +17,11 @@ TWILIO_AUTH_TOKEN   = os.environ["TWILIO_AUTH_TOKEN"]
 TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
+GROQ_API_KEY        = os.environ["GROQ_API_KEY"]
 
 app           = FastAPI()
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+groq_client   = AsyncGroq(api_key=GROQ_API_KEY)
 
 DEEPGRAM_URL = (
     "wss://api.deepgram.com/v1/listen"
@@ -31,6 +34,34 @@ DEEPGRAM_URL = (
     "&endpointing=300"
     "&utterance_end_ms=1000"
 )
+
+# ─── Your agent's personality + context injected here ───────────────────────
+SYSTEM_PROMPT = """You are Aryan, a friendly and professional AI assistant 
+making a phone call on behalf of your user. 
+
+Keep responses:
+- Short and conversational (1-3 sentences max)
+- Natural sounding — this is a phone call, not an essay
+- Focused on the goal of the call
+
+If asked something you don't know, politely say you'll follow up via message.
+Never say you are an AI unless directly asked."""
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def ask_groq(conversation_history: list) -> str:
+    """Send conversation history to Groq, get back agent's reply."""
+    try:
+        response = await groq_client.chat.completions.create(
+            model       = "llama-3.3-70b-versatile",
+            messages    = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history,
+            temperature = 0.7,
+            max_tokens  = 150,   # keep responses short for voice
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[Groq] Error: {e}", flush=True)
+        return "Sorry, give me just a moment."
 
 
 @app.get("/health")
@@ -79,6 +110,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
     audio_queue: asyncio.Queue = asyncio.Queue()
 
+    # Conversation history — grows as the call progresses
+    conversation_history = []
+
+    # Buffer to collect FINAL transcript chunks until speech_final fires
+    transcript_buffer = []
+
     async def receive_from_twilio():
         try:
             while True:
@@ -88,25 +125,21 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
                 if event == "connected":
                     print(f"[{call_sid}] Twilio connected", flush=True)
-
                 elif event == "start":
                     sid = data["start"]["streamSid"]
                     print(f"[{call_sid}] Stream started → {sid}", flush=True)
-
                 elif event == "media":
                     chunk = base64.b64decode(data["media"]["payload"])
                     await audio_queue.put(chunk)
-
                 elif event == "stop":
                     print(f"[{call_sid}] Stream stopped", flush=True)
                     break
-
         except WebSocketDisconnect:
             print(f"[{call_sid}] Twilio disconnected", flush=True)
         except Exception as e:
-            print(f"[{call_sid}] Twilio receive error: {e}", flush=True)
+            print(f"[{call_sid}] Twilio error: {e}", flush=True)
         finally:
-            await audio_queue.put(None)  # sentinel
+            await audio_queue.put(None)
 
     async def stream_to_deepgram():
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
@@ -123,21 +156,20 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                     while True:
                         chunk = await audio_queue.get()
                         if chunk is None:
-                            # Signal end of stream to Deepgram
-                            await dg_ws.send(json.dumps({"type": "CloseStream"}))
-                            print(f"[{call_sid}] Sent CloseStream to Deepgram", flush=True)
+                            try:
+                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                            except Exception:
+                                pass
                             break
                         await dg_ws.send(chunk)
 
                 async def receive_transcripts():
                     async for raw_msg in dg_ws:
                         try:
-                            msg = json.loads(raw_msg)
+                            msg      = json.loads(raw_msg)
                             msg_type = msg.get("type")
 
-                            # Log everything Deepgram sends so we can debug
                             if msg_type != "Results":
-                                print(f"[{call_sid}] Deepgram event: {msg_type}", flush=True)
                                 continue
 
                             alt        = msg["channel"]["alternatives"][0]
@@ -147,22 +179,46 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
                             is_final     = msg.get("is_final", False)
                             speech_final = msg.get("speech_final", False)
-                            label        = "FINAL" if is_final else "interim"
 
-                            print(f"[{call_sid}] [{label}] {transcript}", flush=True)
+                            if is_final:
+                                label = "FINAL" if not speech_final else "FINAL ✅"
+                                print(f"[{call_sid}] [{label}] {transcript}", flush=True)
+                                # Accumulate final chunks into buffer
+                                transcript_buffer.append(transcript)
 
-                            if speech_final:
-                                print(f"[{call_sid}] 🎤 Human turn complete → Groq next", flush=True)
-                                # TODO next step: send transcript to Groq
+                            if speech_final and transcript_buffer:
+                                # Full human turn is complete — flush buffer
+                                full_turn = " ".join(transcript_buffer)
+                                transcript_buffer.clear()
+
+                                print(f"[{call_sid}] 🎤 Human said: {full_turn}", flush=True)
+
+                                # Add to conversation history
+                                conversation_history.append({
+                                    "role": "user",
+                                    "content": full_turn
+                                })
+
+                                # Ask Groq
+                                print(f"[{call_sid}] ⏳ Asking Groq...", flush=True)
+                                agent_reply = await ask_groq(conversation_history)
+
+                                # Add agent reply to history
+                                conversation_history.append({
+                                    "role": "assistant",
+                                    "content": agent_reply
+                                })
+
+                                print(f"[{call_sid}] 🤖 Agent: {agent_reply}", flush=True)
+                                # TODO next step: send agent_reply → ElevenLabs TTS → audio back to Twilio
 
                         except Exception as e:
-                            print(f"[{call_sid}] Transcript parse error: {e}", flush=True)
+                            print(f"[{call_sid}] Transcript error: {e}", flush=True)
 
                 await asyncio.gather(send_audio(), receive_transcripts())
 
         except websockets.exceptions.InvalidStatus as e:
-            # This shows the EXACT HTTP error from Deepgram with body
-            print(f"[{call_sid}] ❌ Deepgram rejected connection: {e}", flush=True)
+            print(f"[{call_sid}] ❌ Deepgram rejected: {e}", flush=True)
         except Exception as e:
             print(f"[{call_sid}] Deepgram error: {type(e).__name__}: {e}", flush=True)
 
