@@ -72,11 +72,10 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     print(f"[{call_sid}] WebSocket connected")
 
-    # --- Deepgram connection ---
     dg_connection = deepgram_client.listen.asyncwebsocket.v("1")
 
-    # Fired on every interim + final transcript
-    async def on_transcript(self, result, **kwargs):
+    # ✅ No 'self' parameter — this is the correct v3 signature
+    async def on_transcript(result, **kwargs):
         try:
             alt        = result.channel.alternatives[0]
             transcript = alt.transcript.strip()
@@ -88,17 +87,13 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             label    = "FINAL" if is_final else "interim"
             print(f"[{call_sid}] [{label}] {transcript}")
 
-            # TODO next step: on is_final → send to Groq LLM
-
         except Exception as e:
             print(f"[{call_sid}] Transcript parse error: {e}")
 
-    async def on_utterance_end(self, utterance_end, **kwargs):
-        # Fires when Deepgram detects the human has finished their turn
+    async def on_utterance_end(utterance_end, **kwargs):
         print(f"[{call_sid}] UtteranceEnd → human finished speaking")
-        # TODO next step: trigger LLM response here
 
-    async def on_error(self, error, **kwargs):
+    async def on_error(error, **kwargs):
         print(f"[{call_sid}] Deepgram error: {error}")
 
     dg_connection.on(LiveTranscriptionEvents.Transcript,   on_transcript)
@@ -106,14 +101,14 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     dg_connection.on(LiveTranscriptionEvents.Error,        on_error)
 
     options = LiveOptions(
-        model          = "nova-3",
-        encoding       = "mulaw",   # matches Twilio's output directly, no conversion needed
-        sample_rate    = 8000,
-        channels       = 1,
-        punctuate      = True,
-        interim_results= True,      # stream partial transcripts as human speaks
-        endpointing    = 300,       # ms of silence → UtteranceEnd fires
-        utterance_end_ms = "1000",  # hard cutoff if endpointing doesn't fire
+        model            = "nova-3",
+        encoding         = "mulaw",
+        sample_rate      = 8000,
+        channels         = 1,
+        punctuate        = True,
+        interim_results  = True,
+        endpointing      = 300,
+        utterance_end_ms = "1000",
     )
 
     connected = await dg_connection.start(options)
@@ -139,7 +134,6 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
             elif event == "media":
                 audio_bytes = base64.b64decode(data["media"]["payload"])
-                # Forward raw mulaw bytes directly to Deepgram
                 await dg_connection.send(audio_bytes)
 
             elif event == "mark":
@@ -152,7 +146,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     except WebSocketDisconnect:
         print(f"[{call_sid}] WebSocket disconnected")
     except Exception as e:
-        print(f"[{call_sid}] Error: {e}")
+        # ✅ Suppress the noisy 'tasks cancelled' error from Deepgram SDK internals
+        if "tasks cancelled" not in str(e).lower() and "cancel" not in str(e).lower():
+            print(f"[{call_sid}] Error: {e}")
     finally:
-        await dg_connection.finish()
+        try:
+            await dg_connection.finish()
+        except Exception:
+            pass
         print(f"[{call_sid}] Deepgram connection closed")
