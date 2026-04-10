@@ -46,7 +46,7 @@ ELEVENLABS_URL = (
     "?output_format=pcm_8000"
 )
 
-# # ─── EDIT THIS to change the agent's persona and goal ───────────────────────
+# ─── EDIT THIS to change the agent's persona and goal ───────────────────────
 # SYSTEM_PROMPT = """You are Samaira, a friendly and professional AI assistant
 # making a phone call on behalf of Immortell Company, to sell GEO optimization services.
 
@@ -105,7 +105,7 @@ async def text_to_mulaw_chunks(text: str):
     }
     payload = {
         "text":     text,
-        "model_id": "eleven_ttv_v3",
+        "model_id": "eleven_multilingual_v2",
         "voice_settings": {
             "stability":         0.4,
             "similarity_boost":  0.8,
