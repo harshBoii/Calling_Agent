@@ -2,14 +2,11 @@ import os
 import json
 import base64
 import asyncio
-import threading
-import queue as thread_queue
+import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
-from deepgram import DeepgramClient
-from deepgram.core.events import EventType
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,7 +19,18 @@ DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
 
 app           = FastAPI()
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-dg_client     = DeepgramClient(api_key=DEEPGRAM_API_KEY)
+
+DEEPGRAM_URL = (
+    "wss://api.deepgram.com/v1/listen"
+    "?model=nova-3"
+    "&encoding=mulaw"
+    "&sample_rate=8000"
+    "&channels=1"
+    "&punctuate=true"
+    "&interim_results=true"
+    "&endpointing=300"
+    "&utterance_end_ms=1000"
+)
 
 
 @app.get("/health")
@@ -36,7 +44,6 @@ async def make_outbound_call(request: Request):
     to_number = body.get("to")
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
-
     call = twilio_client.calls.create(
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
@@ -52,7 +59,7 @@ async def incoming_call(request: Request):
     params   = dict(form)
     call_sid = params.get("CallSid", "unknown")
     caller   = params.get("From", "unknown")
-    print(f"[{call_sid}] Incoming call from {caller}")
+    print(f"[{call_sid}] Incoming call from {caller}", flush=True)
 
     ws_base    = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     stream_url = f"{ws_base}/media-stream/{call_sid}"
@@ -62,113 +69,105 @@ async def incoming_call(request: Request):
     connect  = Connect()
     connect.stream(url=stream_url, name="voice-agent-stream", track="inbound_track")
     response.append(connect)
-
     return Response(content=str(response), media_type="application/xml")
 
 
 @app.websocket("/media-stream/{call_sid}")
 async def media_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
-    print(f"[{call_sid}] Twilio WebSocket connected")
+    print(f"[{call_sid}] Twilio WebSocket connected", flush=True)
 
-    # Thread-safe queue bridges async Twilio → threaded Deepgram
-    audio_queue: thread_queue.Queue = thread_queue.Queue()
+    audio_queue: asyncio.Queue = asyncio.Queue()
 
-    def run_deepgram():
-        # ✅ v1 = nova-3 + mulaw (Twilio compatible)
-        # ✅ v2 = flux-general-en + linear16 ONLY (not for Twilio)
-        with dg_client.listen.v1.connect(
-            model            = "nova-3",
-            encoding         = "mulaw",    # ✅ Twilio sends mulaw — must match
-            sample_rate      = "8000",     # ✅ string
-            channels         = "1",        # ✅ string
-            punctuate        = "true",     # ✅ string
-            interim_results  = "true",     # ✅ string
-            endpointing      = "300",      # ✅ string
-            utterance_end_ms = "1000",     # ✅ string
-            # ❌ vad_events removed — Flux-only feature, causes 400 on nova-3
-        ) as connection:
-
-            ready = threading.Event()
-
-            def on_open(message):
-                print(f"[{call_sid}] Deepgram connected ✅")
-                ready.set()
-
-            def on_message(message):
-                try:
-                    channel = getattr(message, "channel", None)
-                    if not channel:
-                        return
-
-                    transcript = channel.alternatives[0].transcript.strip()
-                    if not transcript:
-                        return
-
-                    is_final     = getattr(message, "is_final", False)
-                    speech_final = getattr(message, "speech_final", False)
-                    label        = "FINAL" if is_final else "interim"
-
-                    print(f"[{call_sid}] [{label}] {transcript}")
-
-                    if speech_final:
-                        print(f"[{call_sid}] 🎤 Human turn complete → Groq next")
-
-                except Exception as e:
-                    print(f"[{call_sid}] Parse error: {e}")
-
-            def on_error(error):
-                print(f"[{call_sid}] Deepgram error: {error}")
-
-            def on_close(message):
-                print(f"[{call_sid}] Deepgram closed")
-
-            connection.on(EventType.OPEN,    on_open)
-            connection.on(EventType.MESSAGE, on_message)
-            connection.on(EventType.ERROR,   on_error)
-            connection.on(EventType.CLOSE,   on_close)
-
-        def stream_audio():
-            ready.wait()
-            print(f"[{call_sid}] Streaming audio to Deepgram...")
+    async def receive_from_twilio():
+        try:
             while True:
-                chunk = audio_queue.get()
-                if chunk is None:
-                    connection.send_finalize()
+                raw   = await websocket.receive_text()
+                data  = json.loads(raw)
+                event = data.get("event")
+
+                if event == "connected":
+                    print(f"[{call_sid}] Twilio connected", flush=True)
+
+                elif event == "start":
+                    sid = data["start"]["streamSid"]
+                    print(f"[{call_sid}] Stream started → {sid}", flush=True)
+
+                elif event == "media":
+                    chunk = base64.b64decode(data["media"]["payload"])
+                    await audio_queue.put(chunk)
+
+                elif event == "stop":
+                    print(f"[{call_sid}] Stream stopped", flush=True)
                     break
-                connection.send_media(chunk)
 
-        threading.Thread(target=stream_audio, daemon=True).start()
-        connection.start_listening()
-    # Start Deepgram in background thread so it doesn't block FastAPI event loop
-    dg_thread = threading.Thread(target=run_deepgram, daemon=True)
-    dg_thread.start()
+        except WebSocketDisconnect:
+            print(f"[{call_sid}] Twilio disconnected", flush=True)
+        except Exception as e:
+            print(f"[{call_sid}] Twilio receive error: {e}", flush=True)
+        finally:
+            await audio_queue.put(None)  # sentinel
 
-    try:
-        while True:
-            raw   = await websocket.receive_text()
-            data  = json.loads(raw)
-            event = data.get("event")
+    async def stream_to_deepgram():
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        try:
+            async with websockets.connect(
+                DEEPGRAM_URL,
+                additional_headers=headers,
+                ping_interval=5,
+                ping_timeout=20,
+            ) as dg_ws:
+                print(f"[{call_sid}] Deepgram connected ✅", flush=True)
 
-            if event == "connected":
-                print(f"[{call_sid}] Twilio connected")
+                async def send_audio():
+                    while True:
+                        chunk = await audio_queue.get()
+                        if chunk is None:
+                            # Signal end of stream to Deepgram
+                            await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                            print(f"[{call_sid}] Sent CloseStream to Deepgram", flush=True)
+                            break
+                        await dg_ws.send(chunk)
 
-            elif event == "start":
-                stream_sid = data["start"]["streamSid"]
-                print(f"[{call_sid}] Stream started → {stream_sid}")
+                async def receive_transcripts():
+                    async for raw_msg in dg_ws:
+                        try:
+                            msg = json.loads(raw_msg)
+                            msg_type = msg.get("type")
 
-            elif event == "media":
-                audio_bytes = base64.b64decode(data["media"]["payload"])
-                audio_queue.put(audio_bytes)   # hand off to Deepgram thread
+                            # Log everything Deepgram sends so we can debug
+                            if msg_type != "Results":
+                                print(f"[{call_sid}] Deepgram event: {msg_type}", flush=True)
+                                continue
 
-            elif event == "stop":
-                print(f"[{call_sid}] Stream stopped")
-                break
+                            alt        = msg["channel"]["alternatives"][0]
+                            transcript = alt.get("transcript", "").strip()
+                            if not transcript:
+                                continue
 
-    except WebSocketDisconnect:
-        print(f"[{call_sid}] Twilio disconnected")
-    except Exception as e:
-        print(f"[{call_sid}] Error: {e}")
-    finally:
-        audio_queue.put(None)   # stop the Deepgram thread cleanly
-        print(f"[{call_sid}] Pipeline finished")
+                            is_final     = msg.get("is_final", False)
+                            speech_final = msg.get("speech_final", False)
+                            label        = "FINAL" if is_final else "interim"
+
+                            print(f"[{call_sid}] [{label}] {transcript}", flush=True)
+
+                            if speech_final:
+                                print(f"[{call_sid}] 🎤 Human turn complete → Groq next", flush=True)
+                                # TODO next step: send transcript to Groq
+
+                        except Exception as e:
+                            print(f"[{call_sid}] Transcript parse error: {e}", flush=True)
+
+                await asyncio.gather(send_audio(), receive_transcripts())
+
+        except websockets.exceptions.InvalidStatus as e:
+            # This shows the EXACT HTTP error from Deepgram with body
+            print(f"[{call_sid}] ❌ Deepgram rejected connection: {e}", flush=True)
+        except Exception as e:
+            print(f"[{call_sid}] Deepgram error: {type(e).__name__}: {e}", flush=True)
+
+    await asyncio.gather(
+        receive_from_twilio(),
+        stream_to_deepgram()
+    )
+    print(f"[{call_sid}] Pipeline finished", flush=True)
