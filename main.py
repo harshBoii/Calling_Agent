@@ -87,7 +87,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             utterance_end_ms="1000",
             vad_events=True,
             # Time in milliseconds of silence to wait for before finalizing speech
-            endpointing=300
+            endpointing="300"
         ) as connection:
             ready = threading.Event()
 
