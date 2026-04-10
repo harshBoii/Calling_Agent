@@ -37,6 +37,7 @@ DEEPGRAM_URL = (
     "&interim_results=true"
     "&endpointing=300"
     "&utterance_end_ms=1000"
+    "&language=hi"
 )
 
 ELEVENLABS_URL = (
