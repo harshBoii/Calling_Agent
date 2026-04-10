@@ -4,4 +4,4 @@ twilio
 python-multipart
 python-dotenv
 websockets
-deepgram-sdk
+deepgram-sdk==3.9.0
