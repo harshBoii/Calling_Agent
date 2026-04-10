@@ -75,71 +75,71 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     audio_queue: thread_queue.Queue = thread_queue.Queue()
 
     def run_deepgram():
-        """Runs entirely in a background thread — matches the user's working pattern."""
-        with dg_client.listen.v2.connect(
-            model          = "nova-3",
-            encoding       = "linear16",
-            sample_rate    = 8000,
-            # To get UtteranceEnd, the following must be set:
-            interim_results=True,
-            utterance_end_ms="1000",
-            vad_events=True,
-            # Time in milliseconds of silence to wait for before finalizing speech
-            endpointing="300"
+        # ✅ v1 = nova-3 + mulaw (Twilio compatible)
+        # ✅ v2 = flux-general-en + linear16 ONLY (not for Twilio)
+        with dg_client.listen.v1.connect(
+            model            = "nova-3",
+            encoding         = "mulaw",    # ✅ Twilio sends mulaw — must match
+            sample_rate      = "8000",     # ✅ string
+            channels         = "1",        # ✅ string
+            punctuate        = "true",     # ✅ string
+            interim_results  = "true",     # ✅ string
+            endpointing      = "300",      # ✅ string
+            utterance_end_ms = "1000",     # ✅ string
+            # ❌ vad_events removed — Flux-only feature, causes 400 on nova-3
         ) as connection:
+
             ready = threading.Event()
 
-            def on_open(result):
-                print(f"[{call_sid}] Deepgram connected")
+            def on_open(message):
+                print(f"[{call_sid}] Deepgram connected ✅")
                 ready.set()
 
-            def on_message(result):
+            def on_message(message):
                 try:
-                    event_type = getattr(result, "type", None)
-                    channel    = getattr(result, "channel", None)
+                    channel = getattr(message, "channel", None)
+                    if not channel:
+                        return
 
-                    if channel and hasattr(channel, "alternatives"):
-                        transcript = channel.alternatives[0].transcript.strip()
-                        if not transcript:
-                            return
-                        is_final = getattr(result, "is_final", False)
-                        label    = "FINAL" if is_final else "interim"
-                        print(f"[{call_sid}] [{label}] {transcript}")
+                    transcript = channel.alternatives[0].transcript.strip()
+                    if not transcript:
+                        return
 
-                        # next step: on is_final → send to Groq
+                    is_final     = getattr(message, "is_final", False)
+                    speech_final = getattr(message, "speech_final", False)
+                    label        = "FINAL" if is_final else "interim"
 
-                    speech_final = getattr(result, "speech_final", False)
+                    print(f"[{call_sid}] [{label}] {transcript}")
+
                     if speech_final:
-                        print(f"[{call_sid}] UtteranceEnd → human turn complete")
-                        # next step: trigger Groq LLM here
+                        print(f"[{call_sid}] 🎤 Human turn complete → Groq next")
 
                 except Exception as e:
-                    print(f"[{call_sid}] Transcript parse error: {e}")
+                    print(f"[{call_sid}] Parse error: {e}")
 
             def on_error(error):
                 print(f"[{call_sid}] Deepgram error: {error}")
 
-            def on_close(result):
-                print(f"[{call_sid}] Deepgram connection closed")
+            def on_close(message):
+                print(f"[{call_sid}] Deepgram closed")
 
             connection.on(EventType.OPEN,    on_open)
             connection.on(EventType.MESSAGE, on_message)
             connection.on(EventType.ERROR,   on_error)
             connection.on(EventType.CLOSE,   on_close)
 
-            def stream_audio():
-                """Wait for Deepgram to be ready, then drain queue into send_media."""
-                ready.wait()
-                print(f"[{call_sid}] Audio streaming to Deepgram started")
-                while True:
-                    chunk = audio_queue.get()
-                    if chunk is None:   # sentinel → call ended
-                        break
-                    connection.send_media(chunk)
+        def stream_audio():
+            ready.wait()
+            print(f"[{call_sid}] Streaming audio to Deepgram...")
+            while True:
+                chunk = audio_queue.get()
+                if chunk is None:
+                    connection.send_finalize()
+                    break
+                connection.send_media(chunk)
 
-            threading.Thread(target=stream_audio, daemon=True).start()
-            connection.start_listening()  # blocks until connection closes
-
+        threading.Thread(target=stream_audio, daemon=True).start()
+        connection.start_listening()
     # Start Deepgram in background thread so it doesn't block FastAPI event loop
     dg_thread = threading.Thread(target=run_deepgram, daemon=True)
     dg_thread.start()
