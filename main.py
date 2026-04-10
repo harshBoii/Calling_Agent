@@ -125,11 +125,9 @@ Use this intel subtly — don't reference it directly. Let it shape HOW you pitc
 Act like the customer is your boss. humbly but professional. Sound like a real person having a real conversation — with natural pauses and occasional light humor if the vibe allows."""
 
 OPENING_GREETING_TEMPLATE = (
-    "Hi, is this {NAME}? "
-    "Hey! This is Samaaira calling from {COMPANY}. "
-    "I'll keep this quick — I'm reaching out because we're helping businesses like yours with {PRODUCT}, "
-    "and right now we have {PERKS_OF_PRODUCT} for new clients. "
-    "Is this a good time to talk for two minutes?"
+    "Hi, {NAME} , This is Samaaira calling from {COMPANY}. "
+    "I'll keep this quick — I'm reaching out to tell you an offer on {PRODUCT}, "
+    "we have {PERKS_OF_PRODUCT} for you , Is this a good time to talk for two minutes?"
 )
 # ─── Call config store ────────────────────────────────────────────────────────
 pending_call_configs:  dict[str, dict] = {}
