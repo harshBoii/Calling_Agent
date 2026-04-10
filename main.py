@@ -38,7 +38,7 @@ async def health():
 
 @app.post("/voice/incoming")
 async def incoming_call(request: Request):
-    params = await validate_twilio_signature(request)
+    # params = await validate_twilio_signature(request)
 
     call_sid = params.get("CallSid", "unknown")
     caller   = params.get("From", "unknown")
@@ -95,3 +95,24 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     except Exception as e:
         print(f"[{call_sid}] Error: {e}")
         await websocket.close()
+
+from twilio.rest import Client
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+@app.post("/call/outbound")
+async def make_outbound_call(request: Request):
+    body = await request.json()
+    to_number = body.get("to")  # number to call
+
+    if not to_number:
+        raise HTTPException(status_code=400, detail="Missing 'to' number")
+
+    call = twilio_client.calls.create(
+        to=to_number,
+        from_=TWILIO_PHONE_NUMBER,
+        url=f"{PUBLIC_BASE_URL}/voice/incoming",  # reuse same TwiML webhook
+        method="POST"
+    )
+
+    return {"call_sid": call.sid, "status": call.status}

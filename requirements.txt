@@ -1,5 +1,6 @@
 fastapi
-uvicorn 
-twilio 
-python-multipart 
+uvicorn[standard]
+twilio
+python-multipart
 python-dotenv
+websockets
