@@ -1,10 +1,13 @@
 import os
 import json
 import base64
+import asyncio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import Response, PlainTextResponse
+from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.request_validator import RequestValidator
+from twilio.rest import Client
+from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,22 +16,12 @@ TWILIO_ACCOUNT_SID  = os.environ["TWILIO_ACCOUNT_SID"]
 TWILIO_AUTH_TOKEN   = os.environ["TWILIO_AUTH_TOKEN"]
 TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
 
 app = FastAPI()
-validator = RequestValidator(TWILIO_AUTH_TOKEN)
-
-
-async def validate_twilio_signature(request: Request):
-    """Reject any POST not signed by Twilio."""
-    url = str(request.url)
-    form = await request.form()
-    params = dict(form)
-    signature = request.headers.get("X-Twilio-Signature", "")
-
-    if not validator.validate(url, params, signature):
-        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
-
-    return params
+validator       = RequestValidator(TWILIO_AUTH_TOKEN)
+twilio_client   = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
 
 
 @app.get("/health")
@@ -36,10 +29,27 @@ async def health():
     return {"ok": True}
 
 
+@app.post("/call/outbound")
+async def make_outbound_call(request: Request):
+    body      = await request.json()
+    to_number = body.get("to")
+
+    if not to_number:
+        raise HTTPException(status_code=400, detail="Missing 'to' number")
+
+    call = twilio_client.calls.create(
+        to=to_number,
+        from_=TWILIO_PHONE_NUMBER,
+        url=f"{PUBLIC_BASE_URL}/voice/incoming",
+        method="POST"
+    )
+    return {"call_sid": call.sid, "status": call.status}
+
+
 @app.post("/voice/incoming")
 async def incoming_call(request: Request):
-    params = await validate_twilio_signature(request)
-
+    form     = await request.form()
+    params   = dict(form)
     call_sid = params.get("CallSid", "unknown")
     caller   = params.get("From", "unknown")
     print(f"[{call_sid}] Incoming call from {caller}")
@@ -60,12 +70,63 @@ async def incoming_call(request: Request):
 @app.websocket("/media-stream/{call_sid}")
 async def media_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
-    stream_sid = None
     print(f"[{call_sid}] WebSocket connected")
+
+    # --- Deepgram connection ---
+    dg_connection = deepgram_client.listen.asyncwebsocket.v("1")
+
+    # Fired on every interim + final transcript
+    async def on_transcript(self, result, **kwargs):
+        try:
+            alt        = result.channel.alternatives[0]
+            transcript = alt.transcript.strip()
+
+            if not transcript:
+                return
+
+            is_final = result.is_final
+            label    = "FINAL" if is_final else "interim"
+            print(f"[{call_sid}] [{label}] {transcript}")
+
+            # TODO next step: on is_final → send to Groq LLM
+
+        except Exception as e:
+            print(f"[{call_sid}] Transcript parse error: {e}")
+
+    async def on_utterance_end(self, utterance_end, **kwargs):
+        # Fires when Deepgram detects the human has finished their turn
+        print(f"[{call_sid}] UtteranceEnd → human finished speaking")
+        # TODO next step: trigger LLM response here
+
+    async def on_error(self, error, **kwargs):
+        print(f"[{call_sid}] Deepgram error: {error}")
+
+    dg_connection.on(LiveTranscriptionEvents.Transcript,   on_transcript)
+    dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
+    dg_connection.on(LiveTranscriptionEvents.Error,        on_error)
+
+    options = LiveOptions(
+        model          = "nova-3",
+        encoding       = "mulaw",   # matches Twilio's output directly, no conversion needed
+        sample_rate    = 8000,
+        channels       = 1,
+        punctuate      = True,
+        interim_results= True,      # stream partial transcripts as human speaks
+        endpointing    = 300,       # ms of silence → UtteranceEnd fires
+        utterance_end_ms = "1000",  # hard cutoff if endpointing doesn't fire
+    )
+
+    connected = await dg_connection.start(options)
+    if not connected:
+        print(f"[{call_sid}] Failed to connect to Deepgram")
+        await websocket.close()
+        return
+
+    print(f"[{call_sid}] Deepgram connected")
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            raw   = await websocket.receive_text()
             data  = json.loads(raw)
             event = data.get("event")
 
@@ -75,16 +136,14 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             elif event == "start":
                 stream_sid = data["start"]["streamSid"]
                 print(f"[{call_sid}] Stream started → streamSid={stream_sid}")
-                print(f"[{call_sid}] Media format: {data['start'].get('mediaFormat')}")
-                # Audio format is always: mulaw, 8000 Hz, 1 channel
 
             elif event == "media":
                 audio_bytes = base64.b64decode(data["media"]["payload"])
-                # TODO next step: pipe audio_bytes → Silero VAD → Deepgram
-                print(f"[{call_sid}] audio chunk: {len(audio_bytes)} bytes (mulaw 8kHz)")
+                # Forward raw mulaw bytes directly to Deepgram
+                await dg_connection.send(audio_bytes)
 
             elif event == "mark":
-                print(f"[{call_sid}] Mark received: {data['mark']['name']}")
+                print(f"[{call_sid}] Mark: {data['mark']['name']}")
 
             elif event == "stop":
                 print(f"[{call_sid}] Stream stopped")
@@ -94,25 +153,6 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         print(f"[{call_sid}] WebSocket disconnected")
     except Exception as e:
         print(f"[{call_sid}] Error: {e}")
-        await websocket.close()
-
-from twilio.rest import Client
-
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-@app.post("/call/outbound")
-async def make_outbound_call(request: Request):
-    body = await request.json()
-    to_number = body.get("to")  # number to call
-
-    if not to_number:
-        raise HTTPException(status_code=400, detail="Missing 'to' number")
-
-    call = twilio_client.calls.create(
-        to=to_number,
-        from_=TWILIO_PHONE_NUMBER,
-        url=f"{PUBLIC_BASE_URL}/voice/incoming",  # reuse same TwiML webhook
-        method="POST"
-    )
-
-    return {"call_sid": call.sid, "status": call.status}
+    finally:
+        await dg_connection.finish()
+        print(f"[{call_sid}] Deepgram connection closed")
