@@ -77,7 +77,7 @@ If asked something you don't know, politely say you'll follow up via message
 Never say you are an AI."""
 
 OPENING_GREETING_TEMPLATE = (
-    "Hello, this is Samaaira. I Called You On Behalf Of {COMPANY} , are you looking for "
+    "Hello {NAME}, this is Samaaira. I Called You On Behalf Of {COMPANY} , are you looking for "
     "{PRODUCT} with {PERKS_OF_PRODUCT}?"
 )
 
