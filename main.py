@@ -80,7 +80,6 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             model          = "nova-3",
             encoding       = "linear16",
             sample_rate    = 8000,
-            channels       = 1,
             punctuate      = True,
             # To get UtteranceEnd, the following must be set:
             interim_results=True,
