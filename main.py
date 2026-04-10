@@ -37,7 +37,7 @@ DEEPGRAM_URL = (
     "&interim_results=true"
     "&endpointing=300"
     "&utterance_end_ms=1000"
-    "&language=hi"
+    "&language=multi"
 )
 
 ELEVENLABS_URL = (
@@ -46,7 +46,7 @@ ELEVENLABS_URL = (
     "?output_format=pcm_8000"
 )
 
-# ─── EDIT THIS to change the agent's persona and goal ───────────────────────
+# # ─── EDIT THIS to change the agent's persona and goal ───────────────────────
 # SYSTEM_PROMPT = """You are Samaira, a friendly and professional AI assistant
 # making a phone call on behalf of Immortell Company, to sell GEO optimization services.
 
@@ -58,7 +58,7 @@ ELEVENLABS_URL = (
 # If asked something you don't know, politely say you'll follow up via message
 # Never say you are an AI."""
 
-# # ─── EDIT THIS to change the opening greeting ────────────────────────────────
+# # # ─── EDIT THIS to change the opening greeting ────────────────────────────────
 # OPENING_GREETING = "Hello, this is Samaira. I Called You On Behalf Of Immortell Company , are you looking for GEO optimization services?"
 
 
@@ -75,7 +75,7 @@ Use Hindi language for the conversation.
 If asked something you don't know, politely say you'll follow up via message.
 Never say you are an AI."""
 
-# # ─── EDIT THIS to change the opening greeting ────────────────────────────────
+# # # ─── EDIT THIS to change the opening greeting ────────────────────────────────
 OPENING_GREETING = "Hello Ma'am mai samaira baat kar rahi hu flipkar se aapka ek return amount pending hai jaisa ki mai dekh paa rahi hu , kya ye sahi samay hai aapse baat krne ka"
 
 # Minimum word count to trigger a Groq response — filters "Yeah", "And", "Hmm"
@@ -105,7 +105,7 @@ async def text_to_mulaw_chunks(text: str):
     }
     payload = {
         "text":     text,
-        "model_id": "eleven_turbo_v2_5",
+        "model_id": "eleven_ttv_v3",
         "voice_settings": {
             "stability":         0.4,
             "similarity_boost":  0.8,
