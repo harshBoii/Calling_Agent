@@ -76,7 +76,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
     def run_deepgram():
         """Runs entirely in a background thread — matches the user's working pattern."""
-        with dg_client.listen.v1.connect(
+        with dg_client.listen.v2.connect(
             model          = "nova-3",
             encoding       = "linear16",
             sample_rate    = 8000,
