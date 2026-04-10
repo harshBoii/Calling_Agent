@@ -125,7 +125,7 @@ Use this intel subtly — don't reference it directly. Let it shape HOW you pitc
 Act like the customer is your boss. humbly but professional. Sound like a real person having a real conversation — with natural pauses and occasional light humor if the vibe allows."""
 
 OPENING_GREETING_TEMPLATE = (
-    "Hi, {NAME} , This is Samaaira calling from {COMPANY}. "
+    "Hi, {NAME} , This is Annie calling from {COMPANY}. "
     "I'll keep this quick — I'm reaching out to tell you an offer on {PRODUCT}, "
     "we have {PERKS_OF_PRODUCT} for you , Is this a good time to talk for two minutes?"
 )
