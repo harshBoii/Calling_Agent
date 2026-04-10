@@ -82,9 +82,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             sample_rate    = 8000,
             channels       = 1,
             punctuate      = True,
-            interim_results= True,
-            endpointing      = "300",    # string, not int
-            utterance_end_ms = "1000",   # ← string, not int
+            # To get UtteranceEnd, the following must be set:
+            interim_results=True,
+            utterance_end_ms="1000",
+            vad_events=True,
+            # Time in milliseconds of silence to wait for before finalizing speech
+            endpointing=300
         ) as connection:
             ready = threading.Event()
 
