@@ -7,3 +7,6 @@ websockets
 groq
 httpx
 audioop-lts
+anthropic
+openai
+google-generativeai

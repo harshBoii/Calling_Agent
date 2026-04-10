@@ -11,24 +11,53 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
 from groq import AsyncGroq
-
+import anthropic
+import google.generativeai as genai
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-TWILIO_ACCOUNT_SID   = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_AUTH_TOKEN    = os.environ["TWILIO_AUTH_TOKEN"]
-TWILIO_PHONE_NUMBER  = os.environ["TWILIO_PHONE_NUMBER"]
-PUBLIC_BASE_URL      = os.environ["PUBLIC_BASE_URL"].rstrip("/")
-DEEPGRAM_API_KEY     = os.environ["DEEPGRAM_API_KEY"]
-GROQ_API_KEY         = os.environ["GROQ_API_KEY"]
-ELEVENLABS_API_KEY   = os.environ["ELEVENLABS_API_KEY"]
-ELEVENLABS_VOICE_ID  = os.environ["ELEVENLABS_VOICE_ID"]
+# ─── Twilio ───────────────────────────────────────────────────────────────────
+TWILIO_ACCOUNT_SID  = os.environ["TWILIO_ACCOUNT_SID"]
+TWILIO_AUTH_TOKEN   = os.environ["TWILIO_AUTH_TOKEN"]
+TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
+PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+
+# ─── STT ──────────────────────────────────────────────────────────────────────
+DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
+
+# ─── TTS ──────────────────────────────────────────────────────────────────────
+ELEVENLABS_API_KEY  = os.environ["ELEVENLABS_API_KEY"]
+ELEVENLABS_VOICE_ID = os.environ["ELEVENLABS_VOICE_ID"]
+
+# ─── LLM keys (only set the ones you use) ────────────────────────────────────
+GROQ_API_KEY        = os.environ.get("GROQ_API_KEY", "")
+OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
+
+# ─── LLM clients ─────────────────────────────────────────────────────────────
+groq_client   = AsyncGroq(api_key=GROQ_API_KEY)         if GROQ_API_KEY      else None
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)     if OPENAI_API_KEY    else None
+claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 app           = FastAPI()
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-LANGUAGE = "English"
+# ─── Default LLM provider + models ───────────────────────────────────────────
+DEFAULT_LLM_PROVIDER = "groq"   # groq | openai | claude | gemini
 
+DEFAULT_LLM_MODELS = {
+    "groq":   "llama-3.3-70b-versatile",
+    "openai": "gpt-4o",
+    "claude": "claude-3-5-haiku-20241022",   # fastest Claude model
+    "gemini": "gemini-2.0-flash",
+}
+
+# ─── Deepgram ─────────────────────────────────────────────────────────────────
 DEEPGRAM_URL_BASE = (
     "wss://api.deepgram.com/v1/listen"
     "?model=nova-3"
@@ -42,34 +71,26 @@ DEEPGRAM_URL_BASE = (
     "&language="
 )
 
+# ─── ElevenLabs ───────────────────────────────────────────────────────────────
 ELEVENLABS_STREAM_PATH = "/stream?output_format=pcm_8000"
-
+ELEVENLABS_MODEL       = "eleven_flash_v2_5"
 
 def elevenlabs_stream_url(voice_id: str) -> str:
     return f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}{ELEVENLABS_STREAM_PATH}"
 
+def deepgram_ws_url(lang: str) -> str:
+    return DEEPGRAM_URL_BASE + lang
 
-ELEVENLABS_MODEL = "eleven_multilingual_v2"
+# ─── Agent defaults ───────────────────────────────────────────────────────────
+LANGUAGE          = "English"
+NAME              = "Samaaira"
+COMPANY           = "Immortell Company"
+PRODUCT           = "GEO optimization services"
+PERKS_OF_PRODUCT  = "10% off on the first month"
+INFO_ABOUT_LEAD   = "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
+MIN_WORDS_TO_RESPOND = 3
 
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-
-groq_client   = AsyncGroq(api_key=GROQ_API_KEY)
-
-# Outbound call configs: cfg_token (TwiML query) → dict; then CallSid → dict
-pending_call_configs: dict[str, dict] = {}
-call_configs_by_sid: dict[str, dict] = {}
-
-
-# ─── EDIT THIS to change the agent's persona and goal ───────────────────────
-
-NAME = "Samaaira"
-COMPANY = "Immortell Company"
-PRODUCT = "GEO optimization services"
-PERKS_OF_PRODUCT = "10% off on the first month"
-INFO_ABOUT_LEAD = "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
-
-SYSTEM_PROMPT_TEMPLATE = """You are Samaira, you have to talk to {NAME}  , You should know about lead that {INFO_ABOUT_LEAD} , behave like a friendly and professional AI assistant
+SYSTEM_PROMPT_TEMPLATE = """You are Samaira, you have to talk to {NAME}, You should know about lead that {INFO_ABOUT_LEAD}, behave like a friendly and professional AI assistant
 making a phone call on behalf of {COMPANY}, to sell {PRODUCT} with {PERKS_OF_PRODUCT} and leverage the information about the lead to sell the product.
 
 Keep responses:
@@ -78,131 +99,144 @@ Keep responses:
 - Focused on the goal of the call
 - Use {LANGUAGE} language for the conversation.
 
-If asked something you don't know, politely say you'll follow up via message
+If asked something you don't know, politely say you'll follow up via message.
 Never say you are an AI."""
 
 OPENING_GREETING_TEMPLATE = (
-    "Hello {NAME}, this is Samaaira. I Called You On Behalf Of {COMPANY} , are you looking for "
-    "{PRODUCT} with {PERKS_OF_PRODUCT}?"
+    "Hello {NAME}, this is Samaaira. I called you on behalf of {COMPANY}. "
+    "Are you looking for {PRODUCT} with {PERKS_OF_PRODUCT}?"
 )
 
-
-def _format_vars(
-    *,
-    language: str,
-    name: str,
-    company: str,
-    product: str,
-    perks_of_product: str,
-    info_about_lead: str,
-) -> dict:
-    return {
-        "LANGUAGE": language,
-        "NAME": name,
-        "COMPANY": company,
-        "PRODUCT": product,
-        "PERKS_OF_PRODUCT": perks_of_product,
-        "INFO_ABOUT_LEAD": info_about_lead,
-    }
+# ─── Call config store ────────────────────────────────────────────────────────
+pending_call_configs:  dict[str, dict] = {}
+call_configs_by_sid:   dict[str, dict] = {}
 
 
-def build_call_config(body: dict | None) -> dict:
-    """Merge POST body overrides with module defaults."""
-    b = body or {}
-    language = b.get("language", LANGUAGE)
-    deepgram_language = b.get("deepgram_language", "en")
-    elevenlabs_model = b.get("elevenlabs_model", ELEVENLABS_MODEL)
-    name = b.get("name", NAME)
-    company = b.get("company", COMPANY)
-    product = b.get("product", PRODUCT)
-    perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
-    lead_info = b.get("info_about_lead", INFO_ABOUT_LEAD)
-    voice_id = b.get("voice_id") or b.get("voiceId") or ELEVENLABS_VOICE_ID
-    ctx = _format_vars(
-        language=language,
-        name=name,
-        company=company,
-        product=product,
-        perks_of_product=perks,
-        info_about_lead=lead_info,
-    )
-    if b.get("system_prompt") is not None:
-        system_prompt = b["system_prompt"]
-    else:
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
-    if b.get("opening_greeting") is not None:
-        opening_greeting = b["opening_greeting"]
-    else:
-        opening_greeting = OPENING_GREETING_TEMPLATE.format(**ctx)
-    return {
-        "language": language,
-        "deepgram_language": deepgram_language,
-        "elevenlabs_model": elevenlabs_model,
-        "voice_id": voice_id,
-        "name": name,
-        "company": company,
-        "product": product,
-        "perks_of_product": perks,
-        "info_about_lead": lead_info,
-        "system_prompt": system_prompt,
-        "opening_greeting": opening_greeting,
-    }
+# ─── LLM ROUTER ───────────────────────────────────────────────────────────────
 
-
-def deepgram_ws_url(deepgram_language: str) -> str:
-    return DEEPGRAM_URL_BASE + deepgram_language
-
-
-# # ─── EDIT THIS to change the agent's persona and goal ───────────────────────
-# SYSTEM_PROMPT = """You are Samaira, a friendly and professional AI assistant
-# making a phone call on behalf of flipkar Company, to talk about a 2000 return amount pending.
-
-# Keep responses:
-# - Short and conversational (1-3 sentences max)
-# - Natural sounding — this is a phone call, not an essay
-# - Focused on the goal of the call
-
-# Use Hindi language for the conversation.
-# If asked something you don't know, politely say you'll follow up via message.
-# Never say you are an AI."""
-
-# # # # ─── EDIT THIS to change the opening greeting ────────────────────────────────
-# OPENING_GREETING = "Hello Ma'am mai samaira baat kar rahi hu flipkar se aapka ek return amount pending hai jaisa ki mai dekh paa rahi hu , kya ye sahi samay hai aapse baat krne ka"
-
-# Minimum word count to trigger a Groq response — filters "Yeah", "And", "Hmm"
-MIN_WORDS_TO_RESPOND = 3
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def ask_groq(conversation_history: list, system_prompt: str) -> str:
+async def ask_llm(
+    conversation_history: list,
+    system_prompt: str,
+    provider: str,
+    model: str,
+) -> str:
+    """
+    Unified LLM caller. Routes to the right provider.
+    provider: "groq" | "openai" | "claude" | "gemini"
+    """
     try:
-        response = await groq_client.chat.completions.create(
-            model       = "llama-3.3-70b-versatile",
-            messages    = [{"role": "system", "content": system_prompt}] + conversation_history,
-            temperature = 0.7,
-            max_tokens  = 150,
-        )
-        return response.choices[0].message.content.strip()
+        # ── Groq ──────────────────────────────────────────────────────────────
+        if provider == "groq":
+            if not groq_client:
+                raise ValueError("GROQ_API_KEY not set")
+            response = await groq_client.chat.completions.create(
+                model       = model,
+                messages    = [{"role": "system", "content": system_prompt}] + conversation_history,
+                temperature = 0.7,
+                max_tokens  = 150,
+            )
+            return response.choices[0].message.content.strip()
+
+        # ── OpenAI / ChatGPT ──────────────────────────────────────────────────
+        elif provider == "openai":
+            if not openai_client:
+                raise ValueError("OPENAI_API_KEY not set")
+            response = await openai_client.chat.completions.create(
+                model       = model,
+                messages    = [{"role": "system", "content": system_prompt}] + conversation_history,
+                temperature = 0.7,
+                max_tokens  = 150,
+            )
+            return response.choices[0].message.content.strip()
+
+        # ── Claude ────────────────────────────────────────────────────────────
+        elif provider == "claude":
+            if not claude_client:
+                raise ValueError("ANTHROPIC_API_KEY not set")
+            # Claude takes system prompt separately, not in messages array
+            response = await claude_client.messages.create(
+                model      = model,
+                system     = system_prompt,
+                messages   = conversation_history,   # already in {role, content} format
+                max_tokens = 150,
+            )
+            return response.content[0].text.strip()
+
+        # ── Gemini ────────────────────────────────────────────────────────────
+        elif provider == "gemini":
+            if not GEMINI_API_KEY:
+                raise ValueError("GEMINI_API_KEY not set")
+            gemini_model = genai.GenerativeModel(
+                model_name   = model,
+                system_instruction = system_prompt,
+            )
+            # Convert OpenAI-style history to Gemini format
+            gemini_history = []
+            for msg in conversation_history:
+                role = "user" if msg["role"] == "user" else "model"
+                gemini_history.append({"role": role, "parts": [msg["content"]]})
+            chat = gemini_model.start_chat(history=gemini_history[:-1] if gemini_history else [])
+            last_msg = gemini_history[-1]["parts"][0] if gemini_history else ""
+            response = await asyncio.to_thread(chat.send_message, last_msg)
+            return response.text.strip()
+
+        else:
+            raise ValueError(f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini")
+
     except Exception as e:
-        print(f"[Groq] Error: {e}", flush=True)
+        print(f"[LLM/{provider}] Error: {e}", flush=True)
         return "Sorry, give me just a moment."
 
 
-async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
-    """Stream PCM from ElevenLabs, convert to mulaw, yield base64 chunks."""
-    headers = {
-        "xi-api-key":   ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
+# ─── Config builder ───────────────────────────────────────────────────────────
+
+def _format_vars(*, language, name, company, product, perks_of_product, info_about_lead) -> dict:
+    return {
+        "LANGUAGE": language, "NAME": name, "COMPANY": company,
+        "PRODUCT": product, "PERKS_OF_PRODUCT": perks_of_product,
+        "INFO_ABOUT_LEAD": info_about_lead,
     }
+
+def build_call_config(body: dict | None) -> dict:
+    b              = body or {}
+    language       = b.get("language", LANGUAGE)
+    dg_language    = b.get("deepgram_language", "en")
+    el_model       = b.get("elevenlabs_model", ELEVENLABS_MODEL)
+    name           = b.get("name", NAME)
+    company        = b.get("company", COMPANY)
+    product        = b.get("product", PRODUCT)
+    perks          = b.get("perks_of_product", PERKS_OF_PRODUCT)
+    lead_info      = b.get("info_about_lead", INFO_ABOUT_LEAD)
+    voice_id       = b.get("voice_id") or b.get("voiceId") or ELEVENLABS_VOICE_ID
+
+    # ── LLM selection ────────────────────────────────────────────────────────
+    provider       = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
+    model          = b.get("llm_model", DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]))
+
+    ctx = _format_vars(language=language, name=name, company=company,
+                       product=product, perks_of_product=perks, info_about_lead=lead_info)
+
+    system_prompt    = b.get("system_prompt") or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+    opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
+
+    return {
+        "language": language, "deepgram_language": dg_language,
+        "elevenlabs_model": el_model, "voice_id": voice_id,
+        "name": name, "company": company, "product": product,
+        "perks_of_product": perks, "info_about_lead": lead_info,
+        "system_prompt": system_prompt, "opening_greeting": opening_greeting,
+        "llm_provider": provider,
+        "llm_model": model,
+    }
+
+
+# ─── TTS ──────────────────────────────────────────────────────────────────────
+
+async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
+    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
-        "text":     text,
-        "model_id": model_id,
-        "voice_settings": {
-            "stability":         0.4,
-            "similarity_boost":  0.8,
-            "style":             0.0,
-            "use_speaker_boost": True,
-        },
+        "text": text, "model_id": model_id,
+        "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.0, "use_speaker_boost": True},
     }
     url = elevenlabs_stream_url(voice_id)
     async with httpx.AsyncClient(timeout=30) as client:
@@ -214,9 +248,10 @@ async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
             async for pcm_chunk in response.aiter_bytes(chunk_size=320):
                 if not pcm_chunk:
                     continue
-                mulaw_chunk = audioop.lin2ulaw(pcm_chunk, 2)
-                yield base64.b64encode(mulaw_chunk).decode("utf-8")
+                yield base64.b64encode(audioop.lin2ulaw(pcm_chunk, 2)).decode("utf-8")
 
+
+# ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -229,93 +264,84 @@ async def make_outbound_call(request: Request):
     to_number = body.get("to")
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
-    # Optional agent params (see build_call_config); strip `to` before merging
-    cfg_body = {k: v for k, v in body.items() if k != "to"}
-    cfg      = build_call_config(cfg_body)
+    cfg_body  = {k: v for k, v in body.items() if k != "to"}
+    cfg       = build_call_config(cfg_body)
     cfg_token = str(uuid.uuid4())
     pending_call_configs[cfg_token] = cfg
     call = twilio_client.calls.create(
-        to=to_number,
-        from_=TWILIO_PHONE_NUMBER,
-        url=f"{PUBLIC_BASE_URL}/voice/incoming?cfg={cfg_token}",
-        method="POST"
+        to=to_number, from_=TWILIO_PHONE_NUMBER,
+        url=f"{PUBLIC_BASE_URL}/voice/incoming?cfg={cfg_token}", method="POST"
     )
+    print(f"[{call.sid}] Outbound → {to_number} using LLM={cfg['llm_provider']}/{cfg['llm_model']}", flush=True)
     return {"call_sid": call.sid, "status": call.status}
 
 
 @app.post("/voice/incoming")
 async def incoming_call(request: Request):
-    form     = await request.form()
-    params   = dict(form)
-    call_sid = params.get("CallSid", "unknown")
-    caller   = params.get("From", "unknown")
+    form      = await request.form()
+    params    = dict(form)
+    call_sid  = params.get("CallSid", "unknown")
+    caller    = params.get("From", "unknown")
     cfg_token = request.query_params.get("cfg")
     if cfg_token and cfg_token in pending_call_configs:
         call_configs_by_sid[call_sid] = pending_call_configs.pop(cfg_token)
     print(f"[{call_sid}] Incoming call from {caller}", flush=True)
-
     ws_base    = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
-    stream_url = f"{ws_base}/media-stream/{call_sid}"
-
-    response = VoiceResponse()
-    connect  = Connect()
-    connect.stream(url=stream_url, name="voice-agent-stream", track="inbound_track")
+    response   = VoiceResponse()
+    connect    = Connect()
+    connect.stream(url=f"{ws_base}/media-stream/{call_sid}", name="voice-agent-stream", track="inbound_track")
     response.append(connect)
     return Response(content=str(response), media_type="application/xml")
 
+
+# ─── WebSocket pipeline ───────────────────────────────────────────────────────
 
 @app.websocket("/media-stream/{call_sid}")
 async def media_stream(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     print(f"[{call_sid}] Twilio WebSocket connected", flush=True)
 
-    call_cfg = call_configs_by_sid.pop(call_sid, None) or build_call_config(None)
-    system_prompt = call_cfg["system_prompt"]
+    call_cfg         = call_configs_by_sid.pop(call_sid, None) or build_call_config(None)
+    system_prompt    = call_cfg["system_prompt"]
     opening_greeting = call_cfg["opening_greeting"]
-    elevenlabs_model = call_cfg["elevenlabs_model"]
-    voice_id = call_cfg["voice_id"]
-    dg_url = deepgram_ws_url(call_cfg["deepgram_language"])
+    el_model         = call_cfg["elevenlabs_model"]
+    voice_id         = call_cfg["voice_id"]
+    dg_url           = deepgram_ws_url(call_cfg["deepgram_language"])
+    llm_provider     = call_cfg["llm_provider"]
+    llm_model        = call_cfg["llm_model"]
+
+    print(f"[{call_sid}] LLM: {llm_provider}/{llm_model}", flush=True)
 
     audio_queue          = asyncio.Queue()
     conversation_history = []
     transcript_buffer    = []
     stream_sid           = None
-
-    # FIX 3 — track whether agent is currently speaking so we can interrupt
-    agent_speaking = False
+    agent_speaking       = False
 
     async def send_audio_to_twilio(text: str):
-        """TTS → mulaw → Twilio WebSocket. Sets agent_speaking flag."""
         nonlocal agent_speaking
         agent_speaking = True
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
-        async for mulaw_b64 in text_to_mulaw_chunks(text, elevenlabs_model, voice_id):
-            # FIX 3 — if human interrupted, stop sending immediately
+        async for mulaw_b64 in text_to_mulaw_chunks(text, el_model, voice_id):
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
                 break
             try:
                 await websocket.send_text(json.dumps({
-                    "event":     "media",
-                    "streamSid": stream_sid,
-                    "media":     {"payload": mulaw_b64}
+                    "event": "media", "streamSid": stream_sid,
+                    "media": {"payload": mulaw_b64}
                 }))
                 chunk_count += 1
             except Exception as e:
                 print(f"[{call_sid}] Send error: {e}", flush=True)
                 break
-
-        # Mark end of agent speech
         try:
             await websocket.send_text(json.dumps({
-                "event":     "mark",
-                "streamSid": stream_sid,
-                "mark":      {"name": "agent_done"}
+                "event": "mark", "streamSid": stream_sid, "mark": {"name": "agent_done"}
             }))
         except Exception:
             pass
-
         agent_speaking = False
         print(f"[{call_sid}] ✅ Sent {chunk_count} chunks", flush=True)
 
@@ -326,32 +352,20 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 raw   = await websocket.receive_text()
                 data  = json.loads(raw)
                 event = data.get("event")
-
                 if event == "connected":
                     print(f"[{call_sid}] Twilio connected", flush=True)
-
                 elif event == "start":
                     stream_sid = data["start"]["streamSid"]
                     print(f"[{call_sid}] Stream started → {stream_sid}", flush=True)
-
-                    # FIX 1 — Agent speaks first immediately on call connect
-                    conversation_history.append({
-                        "role": "assistant",
-                        "content": opening_greeting
-                    })
+                    conversation_history.append({"role": "assistant", "content": opening_greeting})
                     asyncio.create_task(send_audio_to_twilio(opening_greeting))
-
                 elif event == "media":
-                    chunk = base64.b64decode(data["media"]["payload"])
-                    await audio_queue.put(chunk)
-
+                    await audio_queue.put(base64.b64decode(data["media"]["payload"]))
                 elif event == "mark":
                     print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
-
                 elif event == "stop":
                     print(f"[{call_sid}] Stream stopped", flush=True)
                     break
-
         except WebSocketDisconnect:
             print(f"[{call_sid}] Twilio disconnected", flush=True)
         except Exception as e:
@@ -363,12 +377,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         nonlocal agent_speaking
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         try:
-            async with websockets.connect(
-                dg_url,
-                additional_headers=headers,
-                ping_interval=5,
-                ping_timeout=20,
-            ) as dg_ws:
+            async with websockets.connect(dg_url, additional_headers=headers,
+                                          ping_interval=5, ping_timeout=20) as dg_ws:
                 print(f"[{call_sid}] Deepgram connected ✅", flush=True)
 
                 async def send_audio():
@@ -389,23 +399,19 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                             msg = json.loads(raw_msg)
                             if msg.get("type") != "Results":
                                 continue
-
                             alt        = msg["channel"]["alternatives"][0]
                             transcript = alt.get("transcript", "").strip()
                             if not transcript:
                                 continue
-
                             is_final     = msg.get("is_final", False)
                             speech_final = msg.get("speech_final", False)
 
-                            # FIX 3 — Human started speaking → clear Twilio audio buffer
                             if agent_speaking:
                                 agent_speaking = False
                                 print(f"[{call_sid}] ⚡ Human interrupted agent", flush=True)
                                 try:
                                     await websocket.send_text(json.dumps({
-                                        "event":     "clear",
-                                        "streamSid": stream_sid
+                                        "event": "clear", "streamSid": stream_sid
                                     }))
                                 except Exception:
                                     pass
@@ -418,20 +424,17 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                             if speech_final and transcript_buffer:
                                 full_turn = " ".join(transcript_buffer)
                                 transcript_buffer.clear()
-
-                                # FIX 2 — ignore short filler words
-                                word_count = len(full_turn.split())
-                                if word_count < MIN_WORDS_TO_RESPOND:
-                                    print(f"[{call_sid}] ⏭ Skipping short turn ({word_count} words): '{full_turn}'", flush=True)
+                                if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
+                                    print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
                                     continue
-
                                 print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
                                 conversation_history.append({"role": "user", "content": full_turn})
-
-                                agent_reply = await ask_groq(conversation_history, system_prompt)
+                                agent_reply = await ask_llm(
+                                    conversation_history, system_prompt,
+                                    llm_provider, llm_model
+                                )
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
-                                print(f"[{call_sid}] 🤖 Agent: {agent_reply}", flush=True)
-
+                                print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
                                 await send_audio_to_twilio(agent_reply)
 
                         except Exception as e:
@@ -444,8 +447,5 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         except Exception as e:
             print(f"[{call_sid}] Deepgram error: {type(e).__name__}: {e}", flush=True)
 
-    await asyncio.gather(
-        receive_from_twilio(),
-        stream_to_deepgram()
-    )
+    await asyncio.gather(receive_from_twilio(), stream_to_deepgram())
     print(f"[{call_sid}] Pipeline finished", flush=True)
