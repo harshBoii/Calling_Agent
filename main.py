@@ -231,7 +231,7 @@ def build_call_config(body: dict | None) -> dict:
     product        = b.get("product", PRODUCT)
     perks          = b.get("perks_of_product", PERKS_OF_PRODUCT)
     lead_info      = b.get("info_about_lead", INFO_ABOUT_LEAD)
-    voice_id       = b.get("voice_id") or b.get("voiceId") or ELEVENLABS_VOICE_ID
+    voice_id       = ELEVENLABS_VOICE_ID
 
     # ── LLM selection ────────────────────────────────────────────────────────
     provider       = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
