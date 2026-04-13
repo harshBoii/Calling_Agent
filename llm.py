@@ -127,7 +127,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
         resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
         return resp.text.strip()
 
-    if p == "sarvam" and sarvam_chat_client:
+    if p == "sarvam" and sarvam_client:
         print("[GREETING] Using Sarvam", flush=True)
         text = await _sarvam_call(
             model=llm_model,
@@ -206,7 +206,7 @@ async def ask_llm(
             return response.text.strip()
 
         if provider == "sarvam":
-            if not sarvam_chat_client:
+            if not sarvam_client:
                 raise ValueError("SARVAM_API_KEY not set")
 
             # Sarvam-105b requires conversation to start with a user turn.
