@@ -212,7 +212,7 @@ async def ask_llm(
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=2000,
+                max_tokens=4000,
             )
 
             if not text:
