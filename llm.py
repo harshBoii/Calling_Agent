@@ -25,16 +25,47 @@ if GEMINI_API_KEY:
 
 
 def _sarvam_call(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
-    """Run a Sarvam chat completion synchronously (no streaming, no thinking)."""
+    """
+    Sarvam chat completions stream internal reasoning in delta.reasoning_content and the
+    user-facing reply in delta.content. For Twilio TTS we must only use the reply channel.
+
+    See API chunks: reasoning_content tokens first, then content tokens (e.g. Hindi).
+    We never read or concatenate reasoning_content.
+    """
+    parts: list[str] = []
+    for chunk in sarvam_client.chat.completions(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        top_p=1,
+        max_tokens=max_tokens,
+        stream=True,
+        reasoning_effort=None,
+    ):
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+        c = getattr(delta, "content", None)
+        if not c:
+            continue
+        parts.append(c)
+    text = "".join(parts).strip()
+    if text:
+        return text
+    # Fallback: non-streaming final message — use message.content only, never reasoning_content
     response = sarvam_client.chat.completions(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=1,
         max_tokens=max_tokens,
+        stream=False,
         reasoning_effort=None,
     )
-    return (response.choices[0].message.content or "").strip()
+    msg = response.choices[0].message
+    return (getattr(msg, "content", None) or "").strip()
 
 
 async def generate_opening_greeting(cfg: dict) -> str:
