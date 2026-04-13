@@ -125,7 +125,15 @@ PERKS_OF_PRODUCT  = "10% off on the first month"
 INFO_ABOUT_LEAD   = "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
 MIN_WORDS_TO_RESPOND = 3
 
-SYSTEM_PROMPT_TEMPLATE = """You are a warm and persuasive sales representative calling on behalf of {COMPANY}.
+QUESTIONS_TO_ASK = """
+1. What is your name?
+2. What is your email?
+3. What is your phone number?
+"""
+
+AGENT_NAME = "Annie"
+AGENT_ROLE = "warm and persuasive sales representative"
+SYSTEM_PROMPT_TEMPLATE = """You are {Agent_Name} , a {AGENT_ROLE} representative calling on behalf of {COMPANY}.
 
 ## Your Goal
 Sell {PRODUCT} to {NAME}. The offer includes {PERKS_OF_PRODUCT}. Close the call with either a confirmed interest or a scheduled follow-up.
@@ -139,13 +147,14 @@ Use this intel subtly — don't reference it directly. Let it shape HOW you pitc
 - Max 1-2 sentences per response — this is a phone call, not an email
 
 ## Conversation Flow
-1. Warm intro → Identify pain point → ask permission and ask one question tied to their situation → Bridge → connect their pain to your product naturallyOffer → present {PRODUCT} + {PERKS_OF_PRODUCT} as the solution
+1. Warm intro → Identify pain point → ask permission and ask questions tied to their situation → Bridge → connect their pain to your product naturallyOffer → present {PRODUCT} + {PERKS_OF_PRODUCT} as the solution
+You have to ask these questions to the lead:{QUESTIONS_TO_ASK}
 
 ## Tone
 Act like the customer is your boss. humbly but professional. Sound like a real person having a real conversation — with natural pauses and occasional light humor if the vibe allows."""
 
 OPENING_GREETING_TEMPLATE = (
-    "Hi, {NAME} , This is Annie calling from {COMPANY}. "
+    "Hi, {NAME} , This is {Agent_Name} calling from {COMPANY}. "
     "I'll keep this quick — I'm reaching out to tell you an offer on {PRODUCT}, "
     "we have {PERKS_OF_PRODUCT} for you , Is this a good time to talk for two minutes?"
 )
@@ -162,7 +171,7 @@ async def generate_opening_greeting(cfg: dict) -> str:
     prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
 
 Generate a warm, natural opening line for a phone call. It should:
-- Introduce yourself as Annie from {cfg['company']}
+- Introduce yourself as {cfg['agent_name']} from {cfg['company']}
 - Mention you're calling about {cfg['product']}
 - Tease the offer: {cfg['perks_of_product']}
 - End with a soft permission question ("Is this a good time?")
@@ -298,6 +307,16 @@ def build_call_config(body: dict | None) -> dict:
     perks       = b.get("perks_of_product", PERKS_OF_PRODUCT)
     lead_info   = b.get("info_about_lead", INFO_ABOUT_LEAD)
     voice_id    = b.get("voiceId") or ELEVENLABS_VOICE_ID
+    agent_name  = b.get("agent_name") or b.get("AGENT_NAME") or AGENT_NAME
+    agent_role  = b.get("agent_role") or b.get("AGENT_ROLE") or AGENT_ROLE
+
+    q_raw = b.get("questions_to_ask") or b.get("QUESTIONS_TO_ASK") or b.get("questions")
+    if isinstance(q_raw, list):
+        questions_to_ask = "\n".join(f"{i+1}. {str(q).strip()}" for i, q in enumerate(q_raw) if str(q).strip())
+    elif isinstance(q_raw, str) and q_raw.strip():
+        questions_to_ask = q_raw.strip()
+    else:
+        questions_to_ask = QUESTIONS_TO_ASK.strip()
 
     provider    = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
     model       = b.get("llm_model", DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]))
@@ -308,6 +327,11 @@ def build_call_config(body: dict | None) -> dict:
 
     ctx = _format_vars(language=language, name=name, company=company,
                        product=product, perks_of_product=perks, info_about_lead=lead_info)
+    ctx.update({
+        "Agent_Name": agent_name,
+        "AGENT_ROLE": agent_role,
+        "QUESTIONS_TO_ASK": questions_to_ask,
+    })
 
     system_prompt    = b.get("system_prompt") or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
@@ -320,6 +344,8 @@ def build_call_config(body: dict | None) -> dict:
         "name": name, "company": company, "product": product,
         "perks_of_product": perks, "info_about_lead": lead_info,
         "system_prompt": system_prompt, "opening_greeting": opening_greeting,
+        "agent_name": agent_name, "agent_role": agent_role,
+        "questions_to_ask": questions_to_ask,
         "llm_provider": provider, "llm_model": model,
     }
     print(f"Config: {res}")
@@ -365,8 +391,9 @@ async def make_outbound_call(request: Request):
     cfg      = build_call_config(cfg_body)
 
     # ── Generate dynamic greeting (runs before Twilio dials) ─────────────────
+    # If caller provided an opening greeting, respect it (don't overwrite).
     use_dynamic = cfg_body.get("dynamic_greeting", True)   # opt-out via API if needed
-    if use_dynamic:
+    if use_dynamic and not cfg_body.get("opening_greeting"):
         cfg["opening_greeting"] = await generate_opening_greeting(cfg)
         print(f"[GREETING] {cfg['opening_greeting']}", flush=True)
 
