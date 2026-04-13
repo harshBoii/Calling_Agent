@@ -207,12 +207,6 @@ async def ask_llm(
             if not sarvam_client:
                 raise ValueError("SARVAM_API_KEY not set")
 
-            # Sarvam-105b requires conversation to start with a user turn.
-            # The opening greeting is pushed as assistant[0] in history — drop it.
-            filtered = list(conversation_history)
-            while filtered and filtered[0]["role"] == "assistant":
-                filtered.pop(0)
-
             messages = [{"role": "system", "content": system_prompt}]
             text = await _sarvam_call(
                 model=model,
