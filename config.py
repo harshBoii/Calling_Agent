@@ -110,13 +110,15 @@ INFO_ABOUT_LEAD = (
 MIN_WORDS_TO_RESPOND = 3
 
 QUESTIONS_TO_ASK = """
-1. What is your name?
-2. What is your email?
-3. What is your phone number?
+
+1. How are you doing
+
 """
 
 AGENT_NAME = "Annie"
 AGENT_ROLE = "warm and persuasive sales representative"
+
+
 SYSTEM_PROMPT_TEMPLATE = """You are {Agent_Name} , a {AGENT_ROLE} representative calling on behalf of {COMPANY}.
 
 ## Your Goal

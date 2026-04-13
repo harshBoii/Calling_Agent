@@ -27,14 +27,14 @@ sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY 
 
 # ✅ Sarvam Chat via OpenAI-compatible client (proven by curl test)
 # Uses Bearer auth, same /v1/chat/completions endpoint
-sarvam_chat_client = (
-    AsyncOpenAI(
-        base_url="https://api.sarvam.ai/v1",
-        api_key=SARVAM_API_KEY,
-    )
-    if SARVAM_API_KEY
-    else None
-)
+# sarvam_chat_client = (
+#     AsyncOpenAI(
+#         base_url="https://api.sarvam.ai/v1",
+#         api_key=SARVAM_API_KEY,
+#     )
+#     if SARVAM_API_KEY
+#     else None
+# )
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -52,16 +52,14 @@ async def _sarvam_call(
     - Use at least 500 tokens so reasoning doesn't exhaust the budget.
     - content field holds the user-facing reply (safe for Twilio TTS).
     """
-    if not sarvam_chat_client:
+    if not sarvam_client:
         return ""
-    response = await sarvam_chat_client.chat.completions.create(
+    response = await sarvam_client.chat.completions(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=1,
         max_tokens=max_tokens,
-        # Do NOT pass extra_body reasoning_effort unless needed —
-        # sarvam-105b reasons by default and still populates content correctly.
     )
     content = response.choices[0].message.content or ""
     return content.strip()
