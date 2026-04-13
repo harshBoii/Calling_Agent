@@ -106,7 +106,7 @@ def _to_sarvam_lang(dg_lang: str) -> str:
     base = dg_lang.split("-")[0].lower()
     return _DG_TO_SARVAM_LANG.get(base, f"{base}-IN")
 
-    
+
 # ─── ElevenLabs ───────────────────────────────────────────────────────────────
 ELEVENLABS_STREAM_PATH = "/stream?output_format=pcm_8000"
 ELEVENLABS_MODEL       = "eleven_flash_v2_5"
@@ -298,6 +298,7 @@ def _format_vars(*, language, name, company, product, perks_of_product, info_abo
     }
 
 def build_call_config(body: dict | None) -> dict:
+    print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
     b           = body or {}
     # Accept both snake_case (backend) and camelCase (frontend UI) inputs.
     language    = b.get("language") or b.get("languageMode") or LANGUAGE
