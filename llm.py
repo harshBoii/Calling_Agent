@@ -40,7 +40,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-async def _sarvam_call(
+def _sarvam_call(
     *, model: str, messages: list, temperature: float, max_tokens: int
 ) -> str:
     """
