@@ -178,7 +178,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
     # Always use the fastest available model for greetings — cost and speed matter here
     if groq_client:
         resp = await groq_client.chat.completions.create(
-            model       = "llama-3.3-8b-versatile",   # fastest Groq model
+            model       = "llama-3.3-70b-versatile",   # fastest Groq model
             messages    = [{"role": "user", "content": prompt}],
             temperature = 0.9,    # higher = more natural variation per call
             max_tokens  = 120,
