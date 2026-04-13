@@ -432,30 +432,16 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 print(f"[{call_sid}] Deepgram connected ✅", flush=True)
 
                 async def send_audio():
-                    pcm_buffer = bytearray()
                     while True:
                         chunk = await audio_queue.get()
                         if chunk is None:
-                            if pcm_buffer:
-                                audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                                await ws.transcribe(
-                                    audio       = audio_b64,
-                                    encoding    = "audio/wav",   # ← fixed
-                                    sample_rate = 8000,
-                                )
+                            try:
+                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                            except Exception:
+                                pass
                             break
+                        await dg_ws.send(chunk)
 
-                        pcm_chunk = audioop.ulaw2lin(chunk, 2)
-                        pcm_buffer.extend(pcm_chunk)
-
-                        if len(pcm_buffer) >= PCM_BUFFER_TARGET:
-                            audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                            await ws.transcribe(
-                                audio       = audio_b64,
-                                encoding    = "audio/wav",   # ← fixed
-                                sample_rate = 8000,
-                            )
-                            pcm_buffer.clear()
                 async def receive_transcripts():
                     nonlocal agent_speaking
                     async for raw_msg in dg_ws:
@@ -520,9 +506,9 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             print(f"[{call_sid}] ❌ SARVAM_API_KEY not set", flush=True)
             return
 
-        sarvam_lang   = _to_sarvam_lang(call_cfg["deepgram_language"])
-        sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
-        PCM_BUFFER_TARGET = 3200
+        sarvam_lang       = _to_sarvam_lang(call_cfg["deepgram_language"])
+        sarvam_client     = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
+        PCM_BUFFER_TARGET = 3200   # 200ms @ 8kHz PCM16
 
         print(f"[{call_sid}] Connecting to Sarvam STT (lang={sarvam_lang})…", flush=True)
 
@@ -545,13 +531,21 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         if chunk is None:
                             if pcm_buffer:
                                 audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                                await ws.transcribe(audio=audio_b64, encoding="pcm_s16le", sample_rate=8000)
+                                await ws.transcribe(
+                                    audio=audio_b64,
+                                    encoding="audio/wav",   # ✅ fixed
+                                    sample_rate=8000,
+                                )
                             break
                         pcm_chunk = audioop.ulaw2lin(chunk, 2)
                         pcm_buffer.extend(pcm_chunk)
                         if len(pcm_buffer) >= PCM_BUFFER_TARGET:
                             audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                            await ws.transcribe(audio=audio_b64, encoding="pcm_s16le", sample_rate=8000)
+                            await ws.transcribe(
+                                audio=audio_b64,
+                                encoding="audio/wav",       # ✅ fixed
+                                sample_rate=8000,
+                            )
                             pcm_buffer.clear()
 
                 async def receive_transcripts():
@@ -595,7 +589,6 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         except Exception as e:
                             print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
 
-                # ← inside async with ws: block, this is correct
                 await asyncio.gather(send_audio(), receive_transcripts())
 
         except Exception as e:
