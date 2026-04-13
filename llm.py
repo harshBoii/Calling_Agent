@@ -40,7 +40,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def _sarvam_call(
+async def _sarvam_call(
     *, model: str, messages: list, temperature: float, max_tokens: int
 ) -> str:
     """
@@ -52,8 +52,6 @@ def _sarvam_call(
     - Use at least 500 tokens so reasoning doesn't exhaust the budget.
     - content field holds the user-facing reply (safe for Twilio TTS).
     """
-    if not sarvam_client:
-        return ""
     response = sarvam_client.chat.completions(
         model=model,
         messages=messages,
@@ -129,8 +127,8 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
     if p == "sarvam" and sarvam_client:
         print("[GREETING] Using Sarvam", flush=True)
-        text = _sarvam_call(
-            model=llm_model,
+        text = await _sarvam_call(
+            model="sarvam-30b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=500,
