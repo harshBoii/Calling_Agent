@@ -341,12 +341,17 @@ def build_call_config(body: dict | None) -> dict:
         "stt_provider": stt_provider,          # ← NEW
         "elevenlabs_model": el_model,
         "voice_id": voice_id,
-        "name": name, "company": company, "product": product,
-        "perks_of_product": perks, "info_about_lead": lead_info,
-        "system_prompt": system_prompt, "opening_greeting": opening_greeting,
-        "agent_name": agent_name, "agent_role": agent_role,
+        "name": name, "company": company, 
+        "product": product,
+        "perks_of_product": perks, 
+        "info_about_lead": lead_info,
+        "system_prompt": system_prompt, 
+        "opening_greeting": opening_greeting,
+        "agent_name": agent_name, 
+        "agent_role": agent_role,
         "questions_to_ask": questions_to_ask,
-        "llm_provider": provider, "llm_model": model,
+        "llm_provider": provider, 
+        "llm_model": model,
     }
     print(f"Config: {res}")
 
