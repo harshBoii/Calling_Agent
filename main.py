@@ -154,6 +154,55 @@ pending_call_configs:  dict[str, dict] = {}
 call_configs_by_sid:   dict[str, dict] = {}
 
 
+async def generate_opening_greeting(cfg: dict) -> str:
+    """
+    Generates a natural, dynamic opening line using a fast LLM.
+    Runs once at call-creation time, before Twilio connects.
+    """
+    prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
+
+Generate a warm, natural opening line for a phone call. It should:
+- Introduce yourself as Annie from {cfg['company']}
+- Mention you're calling about {cfg['product']}
+- Tease the offer: {cfg['perks_of_product']}
+- End with a soft permission question ("Is this a good time?")
+- Sound like a real human — not scripted or robotic
+- Be MAX 2-3 sentences total
+- Speak in {cfg['language']}
+
+Lead context (use subtly to personalize tone, don't state it directly):
+{cfg['info_about_lead']}
+
+Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
+
+    # Always use the fastest available model for greetings — cost and speed matter here
+    if groq_client:
+        resp = await groq_client.chat.completions.create(
+            model       = "llama-3.3-8b-versatile",   # fastest Groq model
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.9,    # higher = more natural variation per call
+            max_tokens  = 120,
+        )
+        return resp.choices[0].message.content.strip()
+
+    elif openai_client:
+        resp = await openai_client.chat.completions.create(
+            model       = "gpt-5.4-nano",
+            messages    = [{"role": "user", "content": prompt}],
+            temperature = 0.9,
+            max_tokens  = 120,
+        )
+        return resp.choices[0].message.content.strip()
+
+    elif GEMINI_API_KEY:
+        gemini_model = genai.GenerativeModel("gemini-3-flash-preview")
+        resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        return resp.text.strip()
+
+    else:
+        # Fallback to template if no LLM key available
+        return cfg["opening_greeting"]
+
 # ─── LLM ROUTER ───────────────────────────────────────────────────────────────
 
 async def ask_llm(
@@ -309,17 +358,29 @@ async def make_outbound_call(request: Request):
     to_number = body.get("to")
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
-    cfg_body  = {k: v for k, v in body.items() if k != "to"}
-    cfg       = build_call_config(cfg_body)
+
+    cfg_body = {k: v for k, v in body.items() if k != "to"}
+    cfg      = build_call_config(cfg_body)
+
+    # ── Generate dynamic greeting (runs before Twilio dials) ─────────────────
+    use_dynamic = cfg_body.get("dynamic_greeting", True)   # opt-out via API if needed
+    if use_dynamic:
+        cfg["opening_greeting"] = await generate_opening_greeting(cfg)
+        print(f"[GREETING] {cfg['opening_greeting']}", flush=True)
+
     cfg_token = str(uuid.uuid4())
     pending_call_configs[cfg_token] = cfg
+
     call = twilio_client.calls.create(
         to=to_number, from_=TWILIO_PHONE_NUMBER,
         url=f"{PUBLIC_BASE_URL}/voice/incoming?cfg={cfg_token}", method="POST"
     )
-    print(f"[{call.sid}] Outbound → {to_number} using LLM={cfg['llm_provider']}/{cfg['llm_model']}", flush=True)
-    return {"call_sid": call.sid, "status": call.status}
-
+    print(f"[{call.sid}] Outbound → {to_number} | LLM={cfg['llm_provider']}/{cfg['llm_model']}", flush=True)
+    return {
+        "call_sid": call.sid,
+        "status": call.status,
+        "opening_greeting": cfg["opening_greeting"]   # see what was generated
+    }
 
 @app.post("/voice/incoming")
 async def incoming_call(request: Request):
