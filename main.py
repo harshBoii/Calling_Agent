@@ -52,7 +52,7 @@ app           = FastAPI()
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # ─── Default LLM provider + models ───────────────────────────────────────────
-DEFAULT_LLM_PROVIDER = "groq"   # groq | openai | claude | gemini
+DEFAULT_LLM_PROVIDER = "claude"   # groq | openai | claude | gemini
 
 DEFAULT_LLM_MODELS = {
     "groq":   "llama-3.3-70b-versatile",
