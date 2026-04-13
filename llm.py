@@ -112,7 +112,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
             model="sarvam-105b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=500,  # ✅ bumped — reasoning model needs headroom
+            max_tokens=500,  
         )
         if text:
             return text
@@ -191,20 +191,27 @@ async def ask_llm(
         if provider == "sarvam":
             if not sarvam_chat_client:
                 raise ValueError("SARVAM_API_KEY not set")
-            messages = [{"role": "system", "content": system_prompt}] + conversation_history
+
+            # Sarvam-105b requires conversation to start with a user turn.
+            # The opening greeting is pushed as assistant[0] in history — drop it.
+            filtered = list(conversation_history)
+            while filtered and filtered[0]["role"] == "assistant":
+                filtered.pop(0)
+
+            messages = [{"role": "system", "content": system_prompt}] + filtered
             text = await _sarvam_call(
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=600,  # ✅ bumped — reasoning tokens eat into this budget
+                max_tokens=2000,
             )
+            
             if not text:
                 raise ValueError("Sarvam returned empty response")
             return text
-
-        raise ValueError(
-            f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
-        )
+                raise ValueError(
+                    f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
+                )
 
     except Exception as e:
         print(f"[LLM/{provider}] Error: {e}", flush=True)
