@@ -68,7 +68,6 @@ DEEPGRAM_URL_BASE = (
     "&interim_results=true"
     "&endpointing=300"
     "&utterance_end_ms=1000"
-    "&language="
 )
 
 # ─── ElevenLabs ───────────────────────────────────────────────────────────────
@@ -79,7 +78,7 @@ def elevenlabs_stream_url(voice_id: str) -> str:
     return f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}{ELEVENLABS_STREAM_PATH}"
 
 def deepgram_ws_url(lang: str) -> str:
-    return DEEPGRAM_URL_BASE + lang
+    return f"{DEEPGRAM_URL_BASE}&language={lang}"
 
 # ─── Agent defaults ───────────────────────────────────────────────────────────
 LANGUAGE          = "English"
@@ -226,11 +225,17 @@ def build_call_config(body: dict | None) -> dict:
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
 
     return {
-        "language": language, "deepgram_language": dg_language,
-        "elevenlabs_model": el_model, "voice_id": voice_id,
-        "name": name, "company": company, "product": product,
-        "perks_of_product": perks, "info_about_lead": lead_info,
-        "system_prompt": system_prompt, "opening_greeting": opening_greeting,
+        "language": language, 
+        "deepgram_language": dg_language,
+        "elevenlabs_model": el_model, 
+        "voice_id": voice_id,
+        "name": name, 
+        "company": company, 
+        "product": product,
+        "perks_of_product": perks, 
+        "info_about_lead": lead_info,
+        "system_prompt": system_prompt, 
+        "opening_greeting": opening_greeting,
         "llm_provider": provider,
         "llm_model": model,
     }
