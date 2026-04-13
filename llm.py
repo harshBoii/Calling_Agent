@@ -24,33 +24,17 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def _sarvam_stream_collect(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
-    """Run a Sarvam streaming completion synchronously, collecting all delta tokens."""
-    content_parts = []
-    reasoning_parts = []
-    for chunk in sarvam_client.chat.completions(
+def _sarvam_call(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
+    """Run a Sarvam chat completion synchronously (no streaming, no thinking)."""
+    response = sarvam_client.chat.completions(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=1,
         max_tokens=max_tokens,
-        stream=True,
         reasoning_effort=None,
-    ):
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta is None:
-            continue
-        if delta.content:
-            content_parts.append(delta.content)
-        rc = getattr(delta, "reasoning_content", None)
-        if rc:
-            reasoning_parts.append(rc)
-    text = "".join(content_parts).strip()
-    if text:
-        return text
-    return "".join(reasoning_parts).strip()
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 async def generate_opening_greeting(cfg: dict) -> str:
@@ -94,8 +78,8 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
     if sarvam_client:
         text = await asyncio.to_thread(
-            _sarvam_stream_collect,
-            model="sarvam-105b",
+            _sarvam_call,
+            model="sarvam-30b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
@@ -175,14 +159,14 @@ async def ask_llm(
                 raise ValueError("SARVAM_API_KEY not set")
             messages = [{"role": "system", "content": system_prompt}] + conversation_history
             text = await asyncio.to_thread(
-                _sarvam_stream_collect,
+                _sarvam_call,
                 model=model,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=150,
             )
             if not text:
-                raise ValueError("Sarvam returned empty streamed response")
+                raise ValueError("Sarvam returned empty response")
             return text
 
         raise ValueError(
