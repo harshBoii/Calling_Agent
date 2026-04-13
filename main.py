@@ -15,6 +15,8 @@ import anthropic
 import google.generativeai as genai
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+from sarvamai import AsyncSarvamAI   
+
 
 load_dotenv()
 
@@ -23,6 +25,8 @@ TWILIO_ACCOUNT_SID  = os.environ["TWILIO_ACCOUNT_SID"]
 TWILIO_AUTH_TOKEN   = os.environ["TWILIO_AUTH_TOKEN"]
 TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+SARVAM_API_KEY      = os.environ.get("SARVAM_API_KEY", "")
+
 
 # ─── STT ──────────────────────────────────────────────────────────────────────
 DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
@@ -70,6 +74,38 @@ DEEPGRAM_URL_BASE = (
     "&utterance_end_ms=1000"
 )
 
+# ─── STT Provider Routing ──────────────────────────────────────────────────────
+
+# Languages routed to Deepgram (strong Nova-3 models exist for these)
+_DEEPGRAM_LANGS = {"en", "hi"}
+
+def _auto_select_stt(deepgram_language: str) -> str:
+    """
+    Returns 'deepgram' for English and Hindi, 'sarvam' for all other
+    Indian regional languages (ta, te, kn, ml, mr, gu, bn, pa, od, etc.)
+    """
+    lang_base = deepgram_language.split("-")[0].lower()
+    return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
+
+
+_DG_TO_SARVAM_LANG: dict[str, str] = {
+    "kn": "kn-IN",   # Kannada
+    "ta": "ta-IN",   # Tamil
+    "te": "te-IN",   # Telugu
+    "ml": "ml-IN",   # Malayalam
+    "mr": "mr-IN",   # Marathi
+    "gu": "gu-IN",   # Gujarati
+    "bn": "bn-IN",   # Bengali
+    "pa": "pa-IN",   # Punjabi
+    "od": "od-IN",   # Odia
+    "en": "en-IN",   # English (fallback if forced via stt_provider)
+    "hi": "hi-IN",   # Hindi  (fallback if forced via stt_provider)
+}
+
+def _to_sarvam_lang(dg_lang: str) -> str:
+    """Convert a Deepgram-style language code (e.g. 'kn') to Sarvam's BCP-47 code (e.g. 'kn-IN')."""
+    base = dg_lang.split("-")[0].lower()
+    return _DG_TO_SARVAM_LANG.get(base, f"{base}-IN")
 # ─── ElevenLabs ───────────────────────────────────────────────────────────────
 ELEVENLABS_STREAM_PATH = "/stream?output_format=pcm_8000"
 ELEVENLABS_MODEL       = "eleven_flash_v2_5"
@@ -203,20 +239,23 @@ def _format_vars(*, language, name, company, product, perks_of_product, info_abo
     }
 
 def build_call_config(body: dict | None) -> dict:
-    b              = body or {}
-    language       = b.get("language", LANGUAGE)
-    dg_language    = b.get("deepgram_language", "en")
-    el_model       = b.get("elevenlabs_model", ELEVENLABS_MODEL)
-    name           = b.get("name", NAME)
-    company        = b.get("company", COMPANY)
-    product        = b.get("product", PRODUCT)
-    perks          = b.get("perks_of_product", PERKS_OF_PRODUCT)
-    lead_info      = b.get("info_about_lead", INFO_ABOUT_LEAD)
-    voice_id       = b.get("voiceId") or ELEVENLABS_VOICE_ID
+    b           = body or {}
+    language    = b.get("language", LANGUAGE)
+    dg_language = b.get("deepgram_language", "en")
+    el_model    = b.get("elevenlabs_model", ELEVENLABS_MODEL)
+    name        = b.get("name", NAME)
+    company     = b.get("company", COMPANY)
+    product     = b.get("product", PRODUCT)
+    perks       = b.get("perks_of_product", PERKS_OF_PRODUCT)
+    lead_info   = b.get("info_about_lead", INFO_ABOUT_LEAD)
+    voice_id    = b.get("voiceId") or ELEVENLABS_VOICE_ID
 
-    # ── LLM selection ────────────────────────────────────────────────────────
-    provider       = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
-    model          = b.get("llm_model", DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]))
+    provider    = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
+    model       = b.get("llm_model", DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]))
+
+    # ── STT provider: "auto" resolves based on language ──────────────────────
+    stt_raw      = b.get("stt_provider", "auto").lower()   # "auto" | "deepgram" | "sarvam"
+    stt_provider = _auto_select_stt(dg_language) if stt_raw == "auto" else stt_raw
 
     ctx = _format_vars(language=language, name=name, company=company,
                        product=product, perks_of_product=perks, info_about_lead=lead_info)
@@ -225,21 +264,16 @@ def build_call_config(body: dict | None) -> dict:
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
 
     return {
-        "language": language, 
+        "language": language,
         "deepgram_language": dg_language,
-        "elevenlabs_model": el_model, 
+        "stt_provider": stt_provider,          # ← NEW
+        "elevenlabs_model": el_model,
         "voice_id": voice_id,
-        "name": name, 
-        "company": company, 
-        "product": product,
-        "perks_of_product": perks, 
-        "info_about_lead": lead_info,
-        "system_prompt": system_prompt, 
-        "opening_greeting": opening_greeting,
-        "llm_provider": provider,
-        "llm_model": model,
+        "name": name, "company": company, "product": product,
+        "perks_of_product": perks, "info_about_lead": lead_info,
+        "system_prompt": system_prompt, "opening_greeting": opening_greeting,
+        "llm_provider": provider, "llm_model": model,
     }
-
 
 # ─── TTS ──────────────────────────────────────────────────────────────────────
 
@@ -457,6 +491,124 @@ async def media_stream(websocket: WebSocket, call_sid: str):
             print(f"[{call_sid}] ❌ Deepgram rejected: {e}", flush=True)
         except Exception as e:
             print(f"[{call_sid}] Deepgram error: {type(e).__name__}: {e}", flush=True)
+
+            
+
+        async def stream_to_sarvam():
+            """Real-time STT via Sarvam AI (Saaras v3) for Indian regional languages."""
+            nonlocal agent_speaking
+
+            if not SARVAM_API_KEY:
+                print(f"[{call_sid}] ❌ SARVAM_API_KEY not set", flush=True)
+                return
+
+            sarvam_lang   = _to_sarvam_lang(call_cfg["deepgram_language"])
+            sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
+
+            # Twilio → mulaw 8kHz chunks (~160 bytes / 20ms).
+            # Sarvam needs PCM s16le. Buffer ~200ms before each send for stability.
+            PCM_BUFFER_TARGET = 3200   # 200ms @ 8kHz PCM16 = 8000 * 2 * 0.2 = 3200 bytes
+
+            print(f"[{call_sid}] Connecting to Sarvam STT (lang={sarvam_lang})…", flush=True)
+
+            try:
+                async with sarvam_client.speech_to_text_streaming.connect(
+                    model              = "saaras:v3",
+                    mode               = "transcribe",
+                    language_code      = sarvam_lang,
+                    sample_rate        = 8000,
+                    input_audio_codec  = "pcm_s16le",
+                    high_vad_sensitivity = True,
+                    vad_signals        = True,    # get speech_start / speech_end events
+                ) as ws:
+                    print(f"[{call_sid}] Sarvam STT connected ✅", flush=True)
+
+                    # ── Sender: read from queue, convert mulaw→PCM16, buffer, send ──
+                    async def send_audio():
+                        pcm_buffer = bytearray()
+                        while True:
+                            chunk = await audio_queue.get()
+                            if chunk is None:
+                                # flush any remaining audio before exit
+                                if pcm_buffer:
+                                    audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
+                                    await ws.transcribe(
+                                        audio       = audio_b64,
+                                        encoding    = "pcm_s16le",
+                                        sample_rate = 8000,
+                                    )
+                                break
+
+                            # mulaw (u-law 8-bit) → signed 16-bit PCM
+                            pcm_chunk = audioop.ulaw2lin(chunk, 2)
+                            pcm_buffer.extend(pcm_chunk)
+
+                            if len(pcm_buffer) >= PCM_BUFFER_TARGET:
+                                audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
+                                await ws.transcribe(
+                                    audio       = audio_b64,
+                                    encoding    = "pcm_s16le",
+                                    sample_rate = 8000,
+                                )
+                                pcm_buffer.clear()
+
+                    # ── Receiver: handle VAD events + transcript ──────────────────────
+                    async def receive_transcripts():
+                        nonlocal agent_speaking
+                        async for message in ws:
+                            try:
+                                msg_type   = message.get("type", "")
+                                transcript = message.get("text", "").strip()
+
+                                # Barge-in: human started speaking while agent is talking
+                                if msg_type == "speech_start" and agent_speaking:
+                                    agent_speaking = False
+                                    print(f"[{call_sid}] ⚡ Human interrupted agent (Sarvam)", flush=True)
+                                    try:
+                                        await websocket.send_text(json.dumps({
+                                            "event": "clear", "streamSid": stream_sid
+                                        }))
+                                    except Exception:
+                                        pass
+
+                                elif msg_type == "transcript" and transcript:
+                                    print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
+                                    transcript_buffer.append(transcript)
+
+                                # speech_end = full utterance is done → trigger LLM
+                                elif msg_type == "speech_end":
+                                    if transcript_buffer:
+                                        full_turn = " ".join(transcript_buffer)
+                                        transcript_buffer.clear()
+                                        if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
+                                            print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
+                                            continue
+                                        print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
+                                        conversation_history.append({"role": "user", "content": full_turn})
+                                        agent_reply = await ask_llm(
+                                            conversation_history, system_prompt,
+                                            llm_provider, llm_model,
+                                        )
+                                        conversation_history.append({"role": "assistant", "content": agent_reply})
+                                        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
+                                        await send_audio_to_twilio(agent_reply)
+
+                            except Exception as e:
+                                print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
+
+
+                    # ── before the gather, read stt_provider from config ──────────────────────
+                    stt_provider = call_cfg["stt_provider"]   # "deepgram" | "sarvam"
+                    print(f"[{call_sid}] STT: {stt_provider} | LLM: {llm_provider}/{llm_model}", flush=True)
+
+                    # ── choose the right STT pipeline ─────────────────────────────────────────
+                    stt_task = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
+
+                    await asyncio.gather(receive_from_twilio(), stt_task())
+                    print(f"[{call_sid}] Pipeline finished", flush=True)
+
+            except Exception as e:
+                print(f"[{call_sid}] Sarvam STT error: {type(e).__name__}: {e}", flush=True)
 
     await asyncio.gather(receive_from_twilio(), stream_to_deepgram())
     print(f"[{call_sid}] Pipeline finished", flush=True)

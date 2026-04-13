@@ -10,3 +10,4 @@ audioop-lts
 anthropic
 openai
 google-generativeai
+sarvamai
