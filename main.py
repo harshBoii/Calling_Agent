@@ -77,7 +77,7 @@ DEEPGRAM_URL_BASE = (
 # ─── STT Provider Routing ──────────────────────────────────────────────────────
 
 # Languages routed to Deepgram (strong Nova-3 models exist for these)
-_DEEPGRAM_LANGS = {"en", "hi"}
+_DEEPGRAM_LANGS = {"en"}
 
 def _auto_select_stt(deepgram_language: str) -> str:
     """
