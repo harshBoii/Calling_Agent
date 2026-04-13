@@ -10,6 +10,8 @@ from sarvamai import SarvamAI  # still used for TTS/STT/translation
 
 from config import (
     ANTHROPIC_API_KEY,
+    DEFAULT_LLM_MODELS,
+    DEFAULT_LLM_PROVIDER,
     GEMINI_API_KEY,
     GROQ_API_KEY,
     OPENAI_API_KEY,
@@ -65,11 +67,16 @@ async def _sarvam_call(
     return content.strip()
 
 
-async def generate_opening_greeting(cfg: dict , provider: str) -> str:
+async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> str:
     """
     Generates a natural, dynamic opening line using a fast LLM.
     Runs once at call-creation time, before Twilio connects.
     """
+    p = (provider or cfg.get("llm_provider") or DEFAULT_LLM_PROVIDER).strip().lower()
+    llm_model = cfg.get("llm_model") or DEFAULT_LLM_MODELS.get(
+        p, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
+    )
+
     prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
 
 Generate a warm, natural opening line for a phone call. It should:
@@ -86,43 +93,55 @@ Lead context (use subtly to personalize tone, don't state it directly):
 
 Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
-    if provider == "groq":
-        print("Using Groq for opening greeting")
+    if p == "groq" and groq_client:
+        print("[GREETING] Using Groq", flush=True)
         resp = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=llm_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
         )
         return resp.choices[0].message.content.strip()
 
-    if provider == "openai":
-        print("Using OpenAI for opening greeting")
+    if p == "openai" and openai_client:
+        print("[GREETING] Using OpenAI", flush=True)
         resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=llm_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
         )
         return resp.choices[0].message.content.strip()
 
-    if provider == "sarvam":
-        print("Using Sarvam for opening greeting")
-        text = await _sarvam_call(
-            model="sarvam-105b",
+    if p == "claude" and claude_client:
+        print("[GREETING] Using Claude", flush=True)
+        resp = await claude_client.messages.create(
+            model=llm_model,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
             temperature=0.9,
-            max_tokens=500,  
         )
-        if text:
-            return text
+        return resp.content[0].text.strip()
 
-    if provider == "gemini":
-        print("Using Gemini for opening greeting")
-        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+    if p == "gemini" and GEMINI_API_KEY:
+        print("[GREETING] Using Gemini", flush=True)
+        gemini_model = genai.GenerativeModel(llm_model)
         resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
         return resp.text.strip()
 
+    if p == "sarvam" and sarvam_chat_client:
+        print("[GREETING] Using Sarvam", flush=True)
+        text = await _sarvam_call(
+            model=llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+            max_tokens=500,
+        )
+        if text:
+            return text
+        print("[GREETING] Sarvam returned empty, using template", flush=True)
+
+    print(f"[GREETING] No LLM path for provider={p!r} (missing client or key?), using template", flush=True)
     return cfg["opening_greeting"]
 
 
