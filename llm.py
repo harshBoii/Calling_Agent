@@ -26,7 +26,8 @@ if GEMINI_API_KEY:
 
 def _sarvam_stream_collect(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
     """Run a Sarvam streaming completion synchronously, collecting all delta tokens."""
-    parts = []
+    content_parts = []
+    reasoning_parts = []
     for chunk in sarvam_client.chat.completions(
         model=model,
         messages=messages,
@@ -34,12 +35,22 @@ def _sarvam_stream_collect(*, model: str, messages: list, temperature: float, ma
         top_p=1,
         max_tokens=max_tokens,
         stream=True,
+        reasoning_effort=None,
     ):
-        if chunk.choices:
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                parts.append(delta.content)
-    return "".join(parts).strip()
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+        if delta.content:
+            content_parts.append(delta.content)
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
+            reasoning_parts.append(rc)
+    text = "".join(content_parts).strip()
+    if text:
+        return text
+    return "".join(reasoning_parts).strip()
 
 
 async def generate_opening_greeting(cfg: dict) -> str:
