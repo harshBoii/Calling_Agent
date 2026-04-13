@@ -552,13 +552,9 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                     nonlocal agent_speaking
                     async for message in ws:
                         try:
-                            # ✅ Correct — use attribute access
-                            msg_type   = getattr(message, "type", None) or ""
-                            transcript = (getattr(message, "transcript", None) or getattr(message, "text", None) or "").strip()
+                            msg_type = getattr(message, "type", None) or ""
 
-                            # DEBUG: print once to confirm field names (remove after verified)
-                            print(f"[{call_sid}] [SARVAM RAW] type={msg_type!r} transcript={transcript!r} | {message}", flush=True)
-
+                            # ── Barge-in: human started speaking while agent is talking ──────
                             if msg_type == "speech_start" and agent_speaking:
                                 agent_speaking = False
                                 print(f"[{call_sid}] ⚡ Human interrupted agent (Sarvam)", flush=True)
@@ -569,30 +565,33 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 except Exception:
                                     pass
 
-                            elif msg_type == "transcript" and transcript:
-                                print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
-                                transcript_buffer.append(transcript)
+                            # ── Final transcript arrives in "data" events ────────────────────
+                            elif msg_type == "data":
+                                data_obj   = getattr(message, "data", None)
+                                transcript = (getattr(data_obj, "transcript", None) or "").strip()
 
-                            elif msg_type == "speech_end":
-                                if transcript_buffer:
-                                    full_turn = " ".join(transcript_buffer)
-                                    transcript_buffer.clear()
-                                    if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
-                                        print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
-                                        continue
-                                    print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
-                                    conversation_history.append({"role": "user", "content": full_turn})
-                                    agent_reply = await ask_llm(
-                                        conversation_history, system_prompt,
-                                        llm_provider, llm_model,
-                                    )
-                                    conversation_history.append({"role": "assistant", "content": agent_reply})
-                                    print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-                                    await send_audio_to_twilio(agent_reply)
+                                if not transcript:
+                                    continue
+
+                                print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
+
+                                if len(transcript.split()) < MIN_WORDS_TO_RESPOND:
+                                    print(f"[{call_sid}] ⏭ Skipping short turn: '{transcript}'", flush=True)
+                                    continue
+
+                                # Each "data" event is already a complete utterance — fire LLM directly
+                                print(f"[{call_sid}] 🎤 Human: {transcript}", flush=True)
+                                conversation_history.append({"role": "user", "content": transcript})
+                                agent_reply = await ask_llm(
+                                    conversation_history, system_prompt,
+                                    llm_provider, llm_model,
+                                )
+                                conversation_history.append({"role": "assistant", "content": agent_reply})
+                                print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
+                                await send_audio_to_twilio(agent_reply)
 
                         except Exception as e:
                             print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
-
                 await asyncio.gather(send_audio(), receive_transcripts())
 
         except Exception as e:
