@@ -26,47 +26,21 @@ if GEMINI_API_KEY:
 
 def _sarvam_call(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
     """
-    Sarvam chat completions stream internal reasoning in delta.reasoning_content and the
-    user-facing reply in delta.content. For Twilio TTS we must only use the reply channel.
-
-    See API chunks: reasoning_content tokens first, then content tokens (e.g. Hindi).
-    We never read or concatenate reasoning_content.
+    Simple non-streaming Sarvam call.
+    reasoning_effort="low" → fast response, no extended chain-of-thought.
+    Content lives in message.content — safe for Twilio TTS.
     """
-    parts: list[str] = []
-    for chunk in sarvam_client.chat.completions(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        top_p=1,
-        max_tokens=max_tokens,
-        stream=True,
-        reasoning_effort=None,
-    ):
-        if not getattr(chunk, "choices", None):
-            continue
-        delta = chunk.choices[0].delta
-        if delta is None:
-            continue
-        c = getattr(delta, "content", None)
-        if not c:
-            continue
-        parts.append(c)
-    text = "".join(parts).strip()
-    if text:
-        return text
-    # Fallback: non-streaming final message — use message.content only, never reasoning_content
     response = sarvam_client.chat.completions(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=1,
         max_tokens=max_tokens,
-        stream=False,
-        reasoning_effort=None,
+        reasoning_effort="low",  # "low" | "medium" | "high" — never None
     )
     msg = response.choices[0].message
-    return (getattr(msg, "content", None) or "").strip()
-
+    content = getattr(msg, "content", None) or ""
+    return content.strip()
 
 async def generate_opening_greeting(cfg: dict) -> str:
     """
@@ -107,10 +81,11 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
         )
         return resp.choices[0].message.content.strip()
 
+    # In generate_opening_greeting
     if sarvam_client:
         text = await asyncio.to_thread(
             _sarvam_call,
-            model="sarvam-30b",
+            model="sarvam-105b",        # use sarvam-m or sarvam-105b — faster for greetings
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
