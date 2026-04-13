@@ -84,7 +84,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
     if sarvam_client:
         text = await asyncio.to_thread(
             _sarvam_stream_collect,
-            model="sarvam-30b",
+            model="sarvam-105b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
