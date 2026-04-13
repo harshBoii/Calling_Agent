@@ -200,12 +200,12 @@ async def ask_llm(
 
             messages = [{"role": "system", "content": system_prompt}] + filtered
             text = await _sarvam_call(
-                model=model,
+                model="sarvam-105b",
                 messages=messages,
                 temperature=0.7,
                 max_tokens=2000,
             )
-            
+
             if not text:
                 raise ValueError("Sarvam returned empty response")
             return text
