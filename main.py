@@ -354,8 +354,9 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     dg_url           = deepgram_ws_url(call_cfg["deepgram_language"])
     llm_provider     = call_cfg["llm_provider"]
     llm_model        = call_cfg["llm_model"]
+    stt_provider     = call_cfg["stt_provider"]   # ← read here, once
 
-    print(f"[{call_sid}] LLM: {llm_provider}/{llm_model}", flush=True)
+    print(f"[{call_sid}] STT: {stt_provider} | LLM: {llm_provider}/{llm_model}", flush=True)
 
     audio_queue          = asyncio.Queue()
     conversation_history = []
@@ -363,6 +364,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     stream_sid           = None
     agent_speaking       = False
 
+    # ──────────────────────────────────────────────────────────────────────────
     async def send_audio_to_twilio(text: str):
         nonlocal agent_speaking
         agent_speaking = True
@@ -390,6 +392,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         agent_speaking = False
         print(f"[{call_sid}] ✅ Sent {chunk_count} chunks", flush=True)
 
+    # ──────────────────────────────────────────────────────────────────────────
     async def receive_from_twilio():
         nonlocal stream_sid
         try:
@@ -418,6 +421,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         finally:
             await audio_queue.put(None)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # ← sibling to receive_from_twilio, NOT nested inside it
     async def stream_to_deepgram():
         nonlocal agent_speaking
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
@@ -492,123 +497,98 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         except Exception as e:
             print(f"[{call_sid}] Deepgram error: {type(e).__name__}: {e}", flush=True)
 
-            
+    # ──────────────────────────────────────────────────────────────────────────
+    # ← sibling to stream_to_deepgram, NOT nested inside it
+    async def stream_to_sarvam():
+        nonlocal agent_speaking
 
-        async def stream_to_sarvam():
-            """Real-time STT via Sarvam AI (Saaras v3) for Indian regional languages."""
-            nonlocal agent_speaking
+        if not SARVAM_API_KEY:
+            print(f"[{call_sid}] ❌ SARVAM_API_KEY not set", flush=True)
+            return
 
-            if not SARVAM_API_KEY:
-                print(f"[{call_sid}] ❌ SARVAM_API_KEY not set", flush=True)
-                return
+        sarvam_lang   = _to_sarvam_lang(call_cfg["deepgram_language"])
+        sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
+        PCM_BUFFER_TARGET = 3200
 
-            sarvam_lang   = _to_sarvam_lang(call_cfg["deepgram_language"])
-            sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
+        print(f"[{call_sid}] Connecting to Sarvam STT (lang={sarvam_lang})…", flush=True)
 
-            # Twilio → mulaw 8kHz chunks (~160 bytes / 20ms).
-            # Sarvam needs PCM s16le. Buffer ~200ms before each send for stability.
-            PCM_BUFFER_TARGET = 3200   # 200ms @ 8kHz PCM16 = 8000 * 2 * 0.2 = 3200 bytes
+        try:
+            async with sarvam_client.speech_to_text_streaming.connect(
+                model                = "saaras:v3",
+                mode                 = "transcribe",
+                language_code        = sarvam_lang,
+                sample_rate          = 8000,
+                input_audio_codec    = "pcm_s16le",
+                high_vad_sensitivity = True,
+                vad_signals          = True,
+            ) as ws:
+                print(f"[{call_sid}] Sarvam STT connected ✅", flush=True)
 
-            print(f"[{call_sid}] Connecting to Sarvam STT (lang={sarvam_lang})…", flush=True)
-
-            try:
-                async with sarvam_client.speech_to_text_streaming.connect(
-                    model              = "saaras:v3",
-                    mode               = "transcribe",
-                    language_code      = sarvam_lang,
-                    sample_rate        = 8000,
-                    input_audio_codec  = "pcm_s16le",
-                    high_vad_sensitivity = True,
-                    vad_signals        = True,    # get speech_start / speech_end events
-                ) as ws:
-                    print(f"[{call_sid}] Sarvam STT connected ✅", flush=True)
-
-                    # ── Sender: read from queue, convert mulaw→PCM16, buffer, send ──
-                    async def send_audio():
-                        pcm_buffer = bytearray()
-                        while True:
-                            chunk = await audio_queue.get()
-                            if chunk is None:
-                                # flush any remaining audio before exit
-                                if pcm_buffer:
-                                    audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                                    await ws.transcribe(
-                                        audio       = audio_b64,
-                                        encoding    = "pcm_s16le",
-                                        sample_rate = 8000,
-                                    )
-                                break
-
-                            # mulaw (u-law 8-bit) → signed 16-bit PCM
-                            pcm_chunk = audioop.ulaw2lin(chunk, 2)
-                            pcm_buffer.extend(pcm_chunk)
-
-                            if len(pcm_buffer) >= PCM_BUFFER_TARGET:
+                async def send_audio():
+                    pcm_buffer = bytearray()
+                    while True:
+                        chunk = await audio_queue.get()
+                        if chunk is None:
+                            if pcm_buffer:
                                 audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
-                                await ws.transcribe(
-                                    audio       = audio_b64,
-                                    encoding    = "pcm_s16le",
-                                    sample_rate = 8000,
-                                )
-                                pcm_buffer.clear()
+                                await ws.transcribe(audio=audio_b64, encoding="pcm_s16le", sample_rate=8000)
+                            break
+                        pcm_chunk = audioop.ulaw2lin(chunk, 2)
+                        pcm_buffer.extend(pcm_chunk)
+                        if len(pcm_buffer) >= PCM_BUFFER_TARGET:
+                            audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
+                            await ws.transcribe(audio=audio_b64, encoding="pcm_s16le", sample_rate=8000)
+                            pcm_buffer.clear()
 
-                    # ── Receiver: handle VAD events + transcript ──────────────────────
-                    async def receive_transcripts():
-                        nonlocal agent_speaking
-                        async for message in ws:
-                            try:
-                                msg_type   = message.get("type", "")
-                                transcript = message.get("text", "").strip()
+                async def receive_transcripts():
+                    nonlocal agent_speaking
+                    async for message in ws:
+                        try:
+                            msg_type   = message.get("type", "")
+                            transcript = message.get("text", "").strip()
 
-                                # Barge-in: human started speaking while agent is talking
-                                if msg_type == "speech_start" and agent_speaking:
-                                    agent_speaking = False
-                                    print(f"[{call_sid}] ⚡ Human interrupted agent (Sarvam)", flush=True)
-                                    try:
-                                        await websocket.send_text(json.dumps({
-                                            "event": "clear", "streamSid": stream_sid
-                                        }))
-                                    except Exception:
-                                        pass
+                            if msg_type == "speech_start" and agent_speaking:
+                                agent_speaking = False
+                                print(f"[{call_sid}] ⚡ Human interrupted agent (Sarvam)", flush=True)
+                                try:
+                                    await websocket.send_text(json.dumps({
+                                        "event": "clear", "streamSid": stream_sid
+                                    }))
+                                except Exception:
+                                    pass
 
-                                elif msg_type == "transcript" and transcript:
-                                    print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
-                                    transcript_buffer.append(transcript)
+                            elif msg_type == "transcript" and transcript:
+                                print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
+                                transcript_buffer.append(transcript)
 
-                                # speech_end = full utterance is done → trigger LLM
-                                elif msg_type == "speech_end":
-                                    if transcript_buffer:
-                                        full_turn = " ".join(transcript_buffer)
-                                        transcript_buffer.clear()
-                                        if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
-                                            print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
-                                            continue
-                                        print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
-                                        conversation_history.append({"role": "user", "content": full_turn})
-                                        agent_reply = await ask_llm(
-                                            conversation_history, system_prompt,
-                                            llm_provider, llm_model,
-                                        )
-                                        conversation_history.append({"role": "assistant", "content": agent_reply})
-                                        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-                                        await send_audio_to_twilio(agent_reply)
+                            elif msg_type == "speech_end":
+                                if transcript_buffer:
+                                    full_turn = " ".join(transcript_buffer)
+                                    transcript_buffer.clear()
+                                    if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
+                                        print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
+                                        continue
+                                    print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
+                                    conversation_history.append({"role": "user", "content": full_turn})
+                                    agent_reply = await ask_llm(
+                                        conversation_history, system_prompt,
+                                        llm_provider, llm_model,
+                                    )
+                                    conversation_history.append({"role": "assistant", "content": agent_reply})
+                                    print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
+                                    await send_audio_to_twilio(agent_reply)
 
-                            except Exception as e:
-                                print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
+                        except Exception as e:
+                            print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
 
+                # ← inside async with ws: block, this is correct
+                await asyncio.gather(send_audio(), receive_transcripts())
 
-                    # ── before the gather, read stt_provider from config ──────────────────────
-                    stt_provider = call_cfg["stt_provider"]   # "deepgram" | "sarvam"
-                    print(f"[{call_sid}] STT: {stt_provider} | LLM: {llm_provider}/{llm_model}", flush=True)
+        except Exception as e:
+            print(f"[{call_sid}] Sarvam STT error: {type(e).__name__}: {e}", flush=True)
 
-                    # ── choose the right STT pipeline ─────────────────────────────────────────
-                    stt_task = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
-
-                    await asyncio.gather(receive_from_twilio(), stt_task())
-                    print(f"[{call_sid}] Pipeline finished", flush=True)
-
-            except Exception as e:
-                print(f"[{call_sid}] Sarvam STT error: {type(e).__name__}: {e}", flush=True)
-
-    await asyncio.gather(receive_from_twilio(), stream_to_deepgram())
+    # ── Route to the correct STT pipeline ─────────────────────────────────────
+    # ← at the bottom of media_stream, after ALL 4 functions are defined
+    stt_task = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
+    await asyncio.gather(receive_from_twilio(), stt_task())
     print(f"[{call_sid}] Pipeline finished", flush=True)
