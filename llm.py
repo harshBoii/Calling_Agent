@@ -6,7 +6,7 @@ import anthropic
 import google.generativeai as genai
 from groq import AsyncGroq
 from openai import AsyncOpenAI
-from sarvamai import SarvamAI  # still used for TTS/STT/translation
+from sarvamai import SarvamAI 
 
 from config import (
     ANTHROPIC_API_KEY,
@@ -54,7 +54,7 @@ async def _sarvam_call(
     """
     if not sarvam_client:
         return ""
-    response = await sarvam_client.chat.completions(
+    response = sarvam_client.chat.completions(
         model=model,
         messages=messages,
         temperature=temperature,
