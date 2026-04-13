@@ -200,7 +200,7 @@ async def ask_llm(
 
             messages = [{"role": "system", "content": system_prompt}] + filtered
             text = await _sarvam_call(
-                model="sarvam-105b",
+                model=model,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=2000,
