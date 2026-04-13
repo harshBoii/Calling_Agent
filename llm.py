@@ -213,7 +213,7 @@ async def ask_llm(
             while filtered and filtered[0]["role"] == "assistant":
                 filtered.pop(0)
 
-            messages = [{"role": "system", "content": system_prompt}] + filtered
+            messages = [{"role": "system", "content": system_prompt}]
             text = await _sarvam_call(
                 model=model,
                 messages=messages,
