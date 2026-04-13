@@ -209,9 +209,10 @@ async def ask_llm(
             if not text:
                 raise ValueError("Sarvam returned empty response")
             return text
-                raise ValueError(
-                    f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
-                )
+
+        raise ValueError(
+            f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
+        )
 
     except Exception as e:
         print(f"[LLM/{provider}] Error: {e}", flush=True)
