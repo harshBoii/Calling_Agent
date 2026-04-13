@@ -85,8 +85,8 @@ def _auto_select_stt(deepgram_language: str) -> str:
     Indian regional languages (ta, te, kn, ml, mr, gu, bn, pa, od, etc.)
     """
     lang_base = deepgram_language.split("-")[0].lower()
-    return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
-
+    # return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
+    return "sarvam"
 
 _DG_TO_SARVAM_LANG: dict[str, str] = {
     "kn": "kn-IN",   # Kannada
@@ -290,7 +290,7 @@ def _format_vars(*, language, name, company, product, perks_of_product, info_abo
 def build_call_config(body: dict | None) -> dict:
     b           = body or {}
     language    = b.get("language", LANGUAGE)
-    dg_language = b.get("deepgram_language", "en")
+    dg_language = b.get("deepgram_language")
     el_model    = b.get("elevenlabs_model", ELEVENLABS_MODEL)
     name        = b.get("name", NAME)
     company     = b.get("company", COMPANY)
@@ -311,8 +311,7 @@ def build_call_config(body: dict | None) -> dict:
 
     system_prompt    = b.get("system_prompt") or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
-
-    return {
+    res={        
         "language": language,
         "deepgram_language": dg_language,
         "stt_provider": stt_provider,          # ← NEW
@@ -323,6 +322,9 @@ def build_call_config(body: dict | None) -> dict:
         "system_prompt": system_prompt, "opening_greeting": opening_greeting,
         "llm_provider": provider, "llm_model": model,
     }
+    print(f"Config: {res}")
+
+    return res
 
 # ─── TTS ──────────────────────────────────────────────────────────────────────
 
