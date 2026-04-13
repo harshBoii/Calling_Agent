@@ -128,10 +128,10 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
     if p == "sarvam" and sarvam_client:
         print("[GREETING] Using Sarvam", flush=True)
         text = await _sarvam_call(
-            model="sarvam-105b",
+            model="sarvam-30b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=500,
+            max_tokens=4000,
         )
         if text:
             return text
