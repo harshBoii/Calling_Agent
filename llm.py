@@ -75,7 +75,7 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
 
     prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
 
-Generate a warm, natural opening line for a phone call. It should:
+Generate a warm, natural opening line for a phone call. It should be in {cfg['language']}:
 - Introduce yourself as {cfg['agent_name']} from {cfg['company']}
 - Mention you're calling about {cfg['product']}
 - Tease the offer: {cfg['perks_of_product']}
@@ -128,7 +128,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
     if p == "sarvam" and sarvam_client:
         print("[GREETING] Using Sarvam", flush=True)
         text = await _sarvam_call(
-            model="sarvam-30b",
+            model="sarvam-105b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=500,
