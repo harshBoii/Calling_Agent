@@ -24,6 +24,48 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
+def _text_from_sarvam_message(msg) -> str:
+    """
+    Sarvam may return message.content as null (e.g. thinking models put text in reasoning_content).
+    See ChatCompletionResponseMessage: content, reasoning_content, refusal.
+    """
+    if msg is None:
+        return ""
+    for attr in ("content", "reasoning_content"):
+        val = getattr(msg, attr, None)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    raw = getattr(msg, "content", None)
+    if isinstance(raw, list):
+        parts = []
+        for block in raw:
+            if isinstance(block, dict):
+                t = block.get("text") or block.get("content")
+                if t:
+                    parts.append(str(t))
+            else:
+                t = getattr(block, "text", None)
+                if t:
+                    parts.append(str(t))
+        if parts:
+            return " ".join(parts).strip()
+    if hasattr(msg, "model_dump"):
+        d = msg.model_dump()
+        for key in ("content", "reasoning_content"):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _text_from_sarvam_response(response) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ""
+    msg = getattr(choices[0], "message", None)
+    return _text_from_sarvam_message(msg)
+
+
 async def generate_opening_greeting(cfg: dict) -> str:
     """
     Generates a natural, dynamic opening line using a fast LLM.
@@ -72,7 +114,9 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
             top_p=1,
             max_tokens=120,
         )
-        return resp.choices[0].message.content.strip()
+        text = _text_from_sarvam_response(resp)
+        if text:
+            return text
 
     if GEMINI_API_KEY:
         gemini_model = genai.GenerativeModel("gemini-3-flash-preview")
@@ -153,7 +197,10 @@ async def ask_llm(
                 top_p=1,
                 max_tokens=150,
             )
-            return response.choices[0].message.content.strip()
+            text = _text_from_sarvam_response(response)
+            if not text:
+                raise ValueError("Sarvam returned empty assistant text (content and reasoning_content)")
+            return text
 
         raise ValueError(
             f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
