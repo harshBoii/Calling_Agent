@@ -6,7 +6,7 @@ import anthropic
 import google.generativeai as genai
 from groq import AsyncGroq
 from openai import AsyncOpenAI
-from sarvamai import SarvamAI
+from sarvamai import SarvamAI  # still used for TTS/STT/translation
 
 from config import (
     ANTHROPIC_API_KEY,
@@ -19,28 +19,51 @@ from config import (
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+
+# SarvamAI SDK — keep for TTS/STT/translation endpoints
 sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY else None
+
+# ✅ Sarvam Chat via OpenAI-compatible client (proven by curl test)
+# Uses Bearer auth, same /v1/chat/completions endpoint
+sarvam_chat_client = (
+    AsyncOpenAI(
+        base_url="https://api.sarvam.ai/v1",
+        api_key=SARVAM_API_KEY,
+    )
+    if SARVAM_API_KEY
+    else None
+)
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def _sarvam_call(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
+async def _sarvam_call(
+    *, model: str, messages: list, temperature: float, max_tokens: int
+) -> str:
     """
-    Simple non-streaming Sarvam call.
-    reasoning_effort="low" → fast response, no extended chain-of-thought.
-    Content lives in message.content — safe for Twilio TTS.
+    Sarvam chat via OpenAI-compatible client.
+    
+    Key notes:
+    - sarvam-105b is a reasoning model: it thinks before replying.
+    - reasoning_content tokens count toward max_tokens.
+    - Use at least 500 tokens so reasoning doesn't exhaust the budget.
+    - content field holds the user-facing reply (safe for Twilio TTS).
     """
-    response = sarvam_client.chat.completions(
+    if not sarvam_chat_client:
+        return ""
+    response = await sarvam_chat_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=1,
         max_tokens=max_tokens,
-        reasoning_effort="low",  # "low" | "medium" | "high" — never None
+        # Do NOT pass extra_body reasoning_effort unless needed —
+        # sarvam-105b reasons by default and still populates content correctly.
     )
-    msg = response.choices[0].message
-    content = getattr(msg, "content", None) or ""
+    content = response.choices[0].message.content or ""
     return content.strip()
+
 
 async def generate_opening_greeting(cfg: dict) -> str:
     """
@@ -63,7 +86,8 @@ Lead context (use subtly to personalize tone, don't state it directly):
 
 Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
-    if groq_client:
+    if provider == "groq":
+        print("Using Groq for opening greeting")
         resp = await groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
@@ -72,29 +96,30 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
         )
         return resp.choices[0].message.content.strip()
 
-    if openai_client:
+    if provider == "openai":
+        print("Using OpenAI for opening greeting")
         resp = await openai_client.chat.completions.create(
-            model="gpt-5.4-nano",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=120,
         )
         return resp.choices[0].message.content.strip()
 
-    # In generate_opening_greeting
-    if sarvam_client:
-        text = await asyncio.to_thread(
-            _sarvam_call,
-            model="sarvam-105b",        # use sarvam-m or sarvam-105b — faster for greetings
+    if provider == "sarvam":
+        print("Using Sarvam for opening greeting")
+        text = await _sarvam_call(
+            model="sarvam-105b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=120,
+            max_tokens=500,  # ✅ bumped — reasoning model needs headroom
         )
         if text:
             return text
 
-    if GEMINI_API_KEY:
-        gemini_model = genai.GenerativeModel("gemini-3-flash-preview")
+    if provider == "gemini":
+        print("Using Gemini for opening greeting")
+        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
         resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
         return resp.text.strip()
 
@@ -130,6 +155,7 @@ async def ask_llm(
                 model=model,
                 messages=[{"role": "system", "content": system_prompt}] + conversation_history,
                 temperature=0.7,
+                max_tokens=150,
             )
             return response.choices[0].message.content.strip()
 
@@ -155,21 +181,22 @@ async def ask_llm(
             for msg in conversation_history:
                 role = "user" if msg["role"] == "user" else "model"
                 gemini_history.append({"role": role, "parts": [msg["content"]]})
-            chat = gemini_model.start_chat(history=gemini_history[:-1] if gemini_history else [])
+            chat = gemini_model.start_chat(
+                history=gemini_history[:-1] if gemini_history else []
+            )
             last_msg = gemini_history[-1]["parts"][0] if gemini_history else ""
             response = await asyncio.to_thread(chat.send_message, last_msg)
             return response.text.strip()
 
         if provider == "sarvam":
-            if not sarvam_client:
+            if not sarvam_chat_client:
                 raise ValueError("SARVAM_API_KEY not set")
             messages = [{"role": "system", "content": system_prompt}] + conversation_history
-            text = await asyncio.to_thread(
-                _sarvam_call,
+            text = await _sarvam_call(
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=150,
+                max_tokens=600,  # ✅ bumped — reasoning tokens eat into this budget
             )
             if not text:
                 raise ValueError("Sarvam returned empty response")
