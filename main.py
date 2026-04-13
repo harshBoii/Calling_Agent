@@ -41,7 +41,7 @@ async def make_outbound_call(request: Request):
 
     use_dynamic = cfg_body.get("dynamic_greeting", True)
     if use_dynamic and not cfg_body.get("opening_greeting"):
-        cfg["opening_greeting"] = await generate_opening_greeting(cfg)
+        cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
         print(f"[GREETING] {cfg['opening_greeting']}", flush=True)
 
     cfg_token = str(uuid.uuid4())

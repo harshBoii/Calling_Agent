@@ -65,7 +65,7 @@ async def _sarvam_call(
     return content.strip()
 
 
-async def generate_opening_greeting(cfg: dict) -> str:
+async def generate_opening_greeting(cfg: dict , provider: str) -> str:
     """
     Generates a natural, dynamic opening line using a fast LLM.
     Runs once at call-creation time, before Twilio connects.
