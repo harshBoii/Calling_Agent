@@ -552,8 +552,12 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                     nonlocal agent_speaking
                     async for message in ws:
                         try:
-                            msg_type   = message.get("type", "")
-                            transcript = message.get("text", "").strip()
+                            # ✅ Correct — use attribute access
+                            msg_type   = getattr(message, "type", None) or ""
+                            transcript = (getattr(message, "transcript", None) or getattr(message, "text", None) or "").strip()
+
+                            # DEBUG: print once to confirm field names (remove after verified)
+                            print(f"[{call_sid}] [SARVAM RAW] type={msg_type!r} transcript={transcript!r} | {message}", flush=True)
 
                             if msg_type == "speech_start" and agent_speaking:
                                 agent_speaking = False
