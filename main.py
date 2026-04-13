@@ -85,8 +85,7 @@ def _auto_select_stt(deepgram_language: str) -> str:
     Indian regional languages (ta, te, kn, ml, mr, gu, bn, pa, od, etc.)
     """
     lang_base = deepgram_language.split("-")[0].lower()
-    # return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
-    return "sarvam"
+    return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
 
 _DG_TO_SARVAM_LANG: dict[str, str] = {
     "kn": "kn-IN",   # Kannada
@@ -106,6 +105,8 @@ def _to_sarvam_lang(dg_lang: str) -> str:
     """Convert a Deepgram-style language code (e.g. 'kn') to Sarvam's BCP-47 code (e.g. 'kn-IN')."""
     base = dg_lang.split("-")[0].lower()
     return _DG_TO_SARVAM_LANG.get(base, f"{base}-IN")
+
+    
 # ─── ElevenLabs ───────────────────────────────────────────────────────────────
 ELEVENLABS_STREAM_PATH = "/stream?output_format=pcm_8000"
 ELEVENLABS_MODEL       = "eleven_flash_v2_5"
@@ -298,9 +299,10 @@ def _format_vars(*, language, name, company, product, perks_of_product, info_abo
 
 def build_call_config(body: dict | None) -> dict:
     b           = body or {}
-    language    = b.get("language", LANGUAGE)
-    dg_language = b.get("deepgram_language")
-    el_model    = b.get("elevenlabs_model", ELEVENLABS_MODEL)
+    # Accept both snake_case (backend) and camelCase (frontend UI) inputs.
+    language    = b.get("language") or b.get("languageMode") or LANGUAGE
+    dg_language = b.get("deepgram_language") or b.get("deepgramLanguage") or "en"
+    el_model    = b.get("elevenlabs_model") or b.get("voiceMode") or ELEVENLABS_MODEL
     name        = b.get("name", NAME)
     company     = b.get("company", COMPANY)
     product     = b.get("product", PRODUCT)
@@ -388,6 +390,7 @@ async def health():
 @app.post("/call/outbound")
 async def make_outbound_call(request: Request):
     body      = await request.json()
+    print(f"[OUTBOUND] Body: {body}", flush=True)
     to_number = body.get("to")
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
