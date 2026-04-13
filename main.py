@@ -432,16 +432,30 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 print(f"[{call_sid}] Deepgram connected ✅", flush=True)
 
                 async def send_audio():
+                    pcm_buffer = bytearray()
                     while True:
                         chunk = await audio_queue.get()
                         if chunk is None:
-                            try:
-                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
-                            except Exception:
-                                pass
+                            if pcm_buffer:
+                                audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
+                                await ws.transcribe(
+                                    audio       = audio_b64,
+                                    encoding    = "audio/wav",   # ← fixed
+                                    sample_rate = 8000,
+                                )
                             break
-                        await dg_ws.send(chunk)
 
+                        pcm_chunk = audioop.ulaw2lin(chunk, 2)
+                        pcm_buffer.extend(pcm_chunk)
+
+                        if len(pcm_buffer) >= PCM_BUFFER_TARGET:
+                            audio_b64 = base64.b64encode(bytes(pcm_buffer)).decode()
+                            await ws.transcribe(
+                                audio       = audio_b64,
+                                encoding    = "audio/wav",   # ← fixed
+                                sample_rate = 8000,
+                            )
+                            pcm_buffer.clear()
                 async def receive_transcripts():
                     nonlocal agent_speaking
                     async for raw_msg in dg_ws:
