@@ -24,46 +24,22 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-def _text_from_sarvam_message(msg) -> str:
-    """
-    Sarvam may return message.content as null (e.g. thinking models put text in reasoning_content).
-    See ChatCompletionResponseMessage: content, reasoning_content, refusal.
-    """
-    if msg is None:
-        return ""
-    for attr in ("content", "reasoning_content"):
-        val = getattr(msg, attr, None)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    raw = getattr(msg, "content", None)
-    if isinstance(raw, list):
-        parts = []
-        for block in raw:
-            if isinstance(block, dict):
-                t = block.get("text") or block.get("content")
-                if t:
-                    parts.append(str(t))
-            else:
-                t = getattr(block, "text", None)
-                if t:
-                    parts.append(str(t))
-        if parts:
-            return " ".join(parts).strip()
-    if hasattr(msg, "model_dump"):
-        d = msg.model_dump()
-        for key in ("content", "reasoning_content"):
-            v = d.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-    return ""
-
-
-def _text_from_sarvam_response(response) -> str:
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        return ""
-    msg = getattr(choices[0], "message", None)
-    return _text_from_sarvam_message(msg)
+def _sarvam_stream_collect(*, model: str, messages: list, temperature: float, max_tokens: int) -> str:
+    """Run a Sarvam streaming completion synchronously, collecting all delta tokens."""
+    parts = []
+    for chunk in sarvam_client.chat.completions(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        top_p=1,
+        max_tokens=max_tokens,
+        stream=True,
+    ):
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                parts.append(delta.content)
+    return "".join(parts).strip()
 
 
 async def generate_opening_greeting(cfg: dict) -> str:
@@ -106,15 +82,13 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
         return resp.choices[0].message.content.strip()
 
     if sarvam_client:
-        resp = await asyncio.to_thread(
-            sarvam_client.chat.completions,
+        text = await asyncio.to_thread(
+            _sarvam_stream_collect,
             model="sarvam-30b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            top_p=1,
             max_tokens=120,
         )
-        text = _text_from_sarvam_response(resp)
         if text:
             return text
 
@@ -189,17 +163,15 @@ async def ask_llm(
             if not sarvam_client:
                 raise ValueError("SARVAM_API_KEY not set")
             messages = [{"role": "system", "content": system_prompt}] + conversation_history
-            response = await asyncio.to_thread(
-                sarvam_client.chat.completions,
+            text = await asyncio.to_thread(
+                _sarvam_stream_collect,
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                top_p=1,
                 max_tokens=150,
             )
-            text = _text_from_sarvam_response(response)
             if not text:
-                raise ValueError("Sarvam returned empty assistant text (content and reasoning_content)")
+                raise ValueError("Sarvam returned empty streamed response")
             return text
 
         raise ValueError(
