@@ -105,7 +105,6 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
             model=llm_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=120,
         )
         return resp.choices[0].message.content.strip()
 
@@ -170,7 +169,6 @@ async def ask_llm(
                 model=model,
                 messages=[{"role": "system", "content": system_prompt}] + conversation_history,
                 temperature=0.7,
-                max_tokens=150,
             )
             return response.choices[0].message.content.strip()
 
