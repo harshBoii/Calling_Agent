@@ -113,6 +113,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
         resp = await claude_client.messages.create(
             model=llm_model,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=4000,
             temperature=0.9,
         )
         return resp.content[0].text.strip()
@@ -178,6 +179,7 @@ async def ask_llm(
                 model=model,
                 system=system_prompt,
                 messages=conversation_history,
+                max_tokens=4000,
             )
             return response.content[0].text.strip()
 
