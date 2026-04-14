@@ -17,7 +17,7 @@ from config import (
     to_sarvam_lang,
 )
 from llm import ask_llm
-from tts import text_to_mulaw_chunks
+from tts import sarvam_text_to_mulaw_chunks, text_to_mulaw_chunks
 
 
 async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) -> None:
@@ -32,8 +32,12 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
     llm_provider = call_cfg["llm_provider"]
     llm_model = call_cfg["llm_model"]
     stt_provider = call_cfg["stt_provider"]
+    use_sarvam_tts = call_cfg.get("use_sarvam_tts", False)
+    sarvam_speaker = call_cfg.get("sarvam_speaker", "rohan")
+    sarvam_tts_lang = to_sarvam_lang(call_cfg["deepgram_language"])
 
-    print(f"[{call_sid}] STT: {stt_provider} | LLM: {llm_provider}/{llm_model}", flush=True)
+    tts_label = f"sarvam({sarvam_speaker})" if use_sarvam_tts else "elevenlabs"
+    print(f"[{call_sid}] STT: {stt_provider} | TTS: {tts_label} | LLM: {llm_provider}/{llm_model}", flush=True)
 
     audio_queue = asyncio.Queue()
     conversation_history = []
@@ -46,7 +50,11 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
         agent_speaking = True
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
-        async for mulaw_b64 in text_to_mulaw_chunks(text, el_model, voice_id):
+        if use_sarvam_tts:
+            tts_stream = sarvam_text_to_mulaw_chunks(text, sarvam_tts_lang, sarvam_speaker)
+        else:
+            tts_stream = text_to_mulaw_chunks(text, el_model, voice_id)
+        async for mulaw_b64 in tts_stream:
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
                 break

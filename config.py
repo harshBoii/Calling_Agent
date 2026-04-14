@@ -170,6 +170,8 @@ def build_call_config(body: dict | None) -> dict:
     perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
     lead_info = b.get("info_about_lead", INFO_ABOUT_LEAD)
     voice_id = b.get("voiceId") or ELEVENLABS_VOICE_ID
+    use_sarvam_tts = b.get("use_sarvam_tts", False)
+    sarvam_speaker = b.get("sarvam_speaker", "rohan")
     agent_name = b.get("agent_name") or b.get("AGENT_NAME") or AGENT_NAME
     agent_role = b.get("agent_role") or b.get("AGENT_ROLE") or AGENT_ROLE
 
@@ -229,6 +231,8 @@ def build_call_config(body: dict | None) -> dict:
         "questions_to_ask": questions_to_ask,
         "llm_provider": provider,
         "llm_model": model,
+        "use_sarvam_tts": use_sarvam_tts,
+        "sarvam_speaker": sarvam_speaker,
     }
     print(f"Config: {res}")
 
