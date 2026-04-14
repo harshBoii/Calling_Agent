@@ -33,7 +33,7 @@ DEFAULT_LLM_MODELS = {
     "openai": "gpt-5.4-nano",
     "claude": "claude-haiku-4-5-20251001",
     "gemini": "gemini-3-flash-preview",
-    "sarvam": "sarvam-30b",
+    "sarvam": "sarvam-105b",
 }
 
 # ─── Deepgram ─────────────────────────────────────────────────────────────────

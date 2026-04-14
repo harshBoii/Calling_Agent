@@ -25,16 +25,6 @@ claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC
 # SarvamAI SDK — keep for TTS/STT/translation endpoints
 sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY else None
 
-# ✅ Sarvam Chat via OpenAI-compatible client (proven by curl test)
-# Uses Bearer auth, same /v1/chat/completions endpoint
-# sarvam_chat_client = (
-#     AsyncOpenAI(
-#         base_url="https://api.sarvam.ai/v1",
-#         api_key=SARVAM_API_KEY,
-#     )
-#     if SARVAM_API_KEY
-#     else None
-# )
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -127,7 +117,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
     if p == "sarvam" and sarvam_client:
         print("[GREETING] Using Sarvam", flush=True)
         text = await _sarvam_call(
-            model="sarvam-30b",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=4000,
