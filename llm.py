@@ -75,7 +75,7 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
 
     prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
 
-Generate a warm, natural opening line for a phone call. Respond only in {cfg['language']}:
+Generate a warm, natural opening line for a phone call. Respond with text written only in {cfg['language']}:
 - Introduce yourself as {cfg['agent_name']} from {cfg['company']}
 - Mention you're calling about {cfg['product']}
 - Tease the offer: {cfg['perks_of_product']}
