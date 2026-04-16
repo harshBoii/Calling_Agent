@@ -404,6 +404,8 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                     # Telnyx sends stream_id as a top-level field
                     stream_id = data.get("stream_id") or data.get("start", {}).get("streamSid")
                     call_control_id = data.get("start", {}).get("call_control_id", call_sid)
+                    media_format = data.get("start", {}).get("media_format", {})
+                    print(f"[{call_sid}] ⚠️ MEDIA FORMAT: {media_format}", flush=True)
                     print(f"[{call_sid}] Stream started → stream_id={stream_id} call_control_id={call_control_id}", flush=True)
                     conversation_history.append({"role": "assistant", "content": opening_greeting})
                     asyncio.create_task(send_audio(opening_greeting))
