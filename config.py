@@ -66,8 +66,8 @@ def _auto_select_stt(deepgram_language: str) -> str:
     Indian regional languages (ta, te, kn, ml, mr, gu, bn, pa, od, etc.)
     """
     lang_base = deepgram_language.split("-")[0].lower()
-    return "deepgram"
-    #  if lang_base in _DEEPGRAM_LANGS else "sarvam"
+    # return "deepgram" if lang_base in _DEEPGRAM_LANGS else "sarvam"
+    return "sarvam"
 
 
 _DG_TO_SARVAM_LANG: dict[str, str] = {
