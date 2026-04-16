@@ -316,7 +316,7 @@ from config import (
     to_sarvam_lang,
 )
 from llm import ask_llm
-from tts import sarvam_text_to_mulaw_chunks, text_to_mulaw_chunks
+from tts import sarvam_text_to_mulaw_chunks, text_to_audio_chunks
 
 
 async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) -> None:
@@ -352,8 +352,8 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
         if use_sarvam_tts:
             tts_stream = sarvam_text_to_mulaw_chunks(text, sarvam_tts_lang, sarvam_speaker)
         else:
-            tts_stream = text_to_mulaw_chunks(text, el_model, voice_id)
-        async for mulaw_b64 in tts_stream:
+            tts_stream = text_to_audio_chunks(text, el_model, voice_id)
+        async for audio_b64 in tts_stream:
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
                 break
@@ -361,7 +361,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                 await websocket.send_text(
                     json.dumps({
                         "event": "media",
-                        "media": {"payload": mulaw_b64},
+                        "media": {"payload": audio_b64},
                     })
                 )
                 chunk_count += 1

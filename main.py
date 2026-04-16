@@ -97,9 +97,11 @@ async def make_outbound_call(request: Request):
                 "from": TELNYX_PHONE_NUMBER,
                 "stream_url": f"{ws_base}/media-stream/{cfg_token}",
                 "stream_track": "both_tracks",
-                # "stream_bidirectional_mode": "rtp",  # enables sending audio back
+                "stream_bidirectional_mode": "rtp",  # enables sending audio back
             },
         )
+        resp_body = resp.text
+        print(f"[TELNYX] {resp.status_code}: {resp_body}", flush=True)
         resp.raise_for_status()
         data = resp.json()["data"]
 

@@ -1,4 +1,4 @@
-"""ElevenLabs & Sarvam streaming TTS → μ-law chunks for Twilio."""
+"""ElevenLabs & Sarvam streaming TTS → audio chunks."""
 
 import audioop
 import base64
@@ -9,7 +9,8 @@ import httpx
 from config import ELEVENLABS_API_KEY, SARVAM_API_KEY, elevenlabs_stream_url, to_sarvam_lang
 
 
-async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
+async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
+    """Stream ElevenLabs MP3 → base64 chunks for Telnyx bidirectional RTP."""
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
         "text": text,
@@ -28,10 +29,11 @@ async def text_to_mulaw_chunks(text: str, model_id: str, voice_id: str):
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
                 return
-            async for pcm_chunk in response.aiter_bytes(chunk_size=320):
-                if not pcm_chunk:
+            async for mp3_chunk in response.aiter_bytes(chunk_size=8192):
+                if not mp3_chunk:
                     continue
-                yield base64.b64encode(audioop.lin2ulaw(pcm_chunk, 2)).decode("utf-8")
+                # Telnyx expects base64-encoded audio payloads.
+                yield base64.b64encode(mp3_chunk).decode("utf-8")
 
 
 SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
