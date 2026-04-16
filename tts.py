@@ -10,7 +10,7 @@ from config import ELEVENLABS_API_KEY, SARVAM_API_KEY, elevenlabs_stream_url, to
 
 
 async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
-    """Stream ElevenLabs MP3 bytes for Telnyx playback."""
+    """Stream ElevenLabs → collect full MP3 → yield single base64 payload (Telnyx playback)."""
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
         "text": text,
@@ -29,10 +29,12 @@ async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
                 return
-            async for mp3_chunk in response.aiter_bytes(chunk_size=8192):
-                if not mp3_chunk:
-                    continue
-                yield mp3_chunk
+            mp3_bytes = b""
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                if chunk:
+                    mp3_bytes += chunk
+    if mp3_bytes:
+        yield base64.b64encode(mp3_bytes).decode("utf-8")
 
 
 async def sarvam_text_to_mp3_chunks(
@@ -40,7 +42,7 @@ async def sarvam_text_to_mp3_chunks(
     target_language_code: str,
     speaker: str = "rohan",
 ):
-    """Stream Sarvam TTS MP3 bytes for Telnyx playback."""
+    """Collect full Sarvam MP3 → yield single base64 payload (Telnyx playback)."""
     headers = {
         "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json",
@@ -61,9 +63,12 @@ async def sarvam_text_to_mp3_chunks(
                 body = await response.aread()
                 print(f"[Sarvam TTS] Error {response.status_code}: {body}", flush=True)
                 return
+            mp3_bytes = b""
             async for chunk in response.aiter_bytes(chunk_size=8192):
                 if chunk:
-                    yield chunk
+                    mp3_bytes += chunk
+    if mp3_bytes:
+        yield base64.b64encode(mp3_bytes).decode("utf-8")
 
 
 SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
