@@ -28,6 +28,28 @@ app = FastAPI()
 pending_call_configs: dict[str, dict] = {}
 call_configs_by_sid: dict[str, dict] = {}
 
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+def _normalize_to_e164(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+
+    # Allow "00" international prefix.
+    if s.startswith("00"):
+        s = "+" + s[2:]
+
+    # Strip formatting characters/spaces, keep digits and a leading "+".
+    if s.startswith("+"):
+        s = "+" + re.sub(r"\D", "", s[1:])
+    else:
+        s = re.sub(r"\D", "", s)
+        if s:
+            s = "+" + s
+
+    return s
+
 
 @app.get("/health")
 async def health():
@@ -69,13 +91,16 @@ async def health():
 @app.post("/call/outbound")
 async def make_outbound_call(request: Request):
     body = await request.json()
-    to_number = body.get("to")
-    to_number = re.sub(r'^[\+1]', '', to_number)
-    if not to_number.startswith("+"):
-        to_number = "+" + to_number
-
-    if not to_number:
+    raw_to = body.get("to")
+    if not raw_to:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
+
+    to_number = _normalize_to_e164(str(raw_to))
+    if not _E164_RE.match(to_number):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {raw_to!r})",
+        )
 
     cfg_body = {k: v for k, v in body.items() if k != "to"}
     cfg = build_call_config(cfg_body)
