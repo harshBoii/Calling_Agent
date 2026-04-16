@@ -102,6 +102,8 @@ async def make_outbound_call(request: Request):
         )
         resp_body = resp.text
         print(f"[TELNYX] {resp.status_code}: {resp_body}", flush=True)
+        print(f"to_number: {to_number}")
+   
         resp.raise_for_status()
         data = resp.json()["data"]
 
