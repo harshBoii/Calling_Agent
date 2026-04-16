@@ -410,8 +410,10 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                 elif event == "media":
                     media = data.get("media") or {}
                     track = media.get("track", "inbound")
+                    payload = media.get("payload")
+                    size = len(payload) if isinstance(payload, str) else 0
+                    print(f"[{call_sid}] Telnyx MEDIA track={track} payload_len={size}", flush=True)
                     if track == "inbound":
-                        payload = media.get("payload")
                         if payload:
                             await audio_queue.put(base64.b64decode(payload))
                 elif event == "mark":
@@ -449,12 +451,14 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                             except Exception:
                                 pass
                             break
+                        print(f"[{call_sid}] → Deepgram {len(chunk)} bytes", flush=True)
                         await dg_ws.send(chunk)
 
                 async def receive_transcripts():
                     nonlocal agent_speaking
                     async for raw_msg in dg_ws:
                         try:
+                            print(f"[{call_sid}] DG RAW: {raw_msg[:200]}", flush=True)
                             msg = json.loads(raw_msg)
                             if msg.get("type") != "Results":
                                 continue
