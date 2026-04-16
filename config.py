@@ -50,8 +50,8 @@ DEEPGRAM_URL_BASE = (
     "&channels=1"
     "&punctuate=true"
     "&interim_results=true"
-    "&endpointing=200"
-    "&utterance_end_ms=500"
+    "&endpointing=300"
+    "&utterance_end_ms=1000"
 )
 
 # ─── STT Provider Routing ──────────────────────────────────────────────────────
