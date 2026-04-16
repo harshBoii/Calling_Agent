@@ -114,7 +114,7 @@ PERKS_OF_PRODUCT = "10% off on the first month"
 INFO_ABOUT_LEAD = (
     "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
 )
-MIN_WORDS_TO_RESPOND = 3
+MIN_WORDS_TO_RESPOND = 2
 
 QUESTIONS_TO_ASK = """
 
