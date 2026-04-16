@@ -126,7 +126,7 @@ async def make_outbound_call(request: Request):
                 "to": to_number,
                 "from": TELNYX_PHONE_NUMBER,
                 "stream_url": f"{ws_base}/media-stream/{cfg_token}",
-                "stream_track": "both_tracks",
+                "stream_track": "inbound_track",
                 "stream_bidirectional_mode": "rtp",  # enables sending audio back
             },
         )

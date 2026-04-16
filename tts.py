@@ -10,7 +10,7 @@ from config import ELEVENLABS_API_KEY, SARVAM_API_KEY, elevenlabs_stream_url, to
 
 
 async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
-    """Stream ElevenLabs MP3 → base64 chunks for Telnyx bidirectional RTP."""
+    """Stream ElevenLabs μ-law (PCMU) 8kHz → base64 chunks for Telnyx."""
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
         "text": text,
@@ -29,11 +29,10 @@ async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
                 return
-            async for mp3_chunk in response.aiter_bytes(chunk_size=8192):
-                if not mp3_chunk:
+            async for ulaw_chunk in response.aiter_bytes(chunk_size=320):
+                if not ulaw_chunk:
                     continue
-                # Telnyx expects base64-encoded audio payloads.
-                yield base64.b64encode(mp3_chunk).decode("utf-8")
+                yield base64.b64encode(ulaw_chunk).decode("utf-8")
 
 
 SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
@@ -91,6 +90,11 @@ async def sarvam_text_to_mulaw_chunks(
 def _decode_mp3_to_pcm(mp3_bytes: bytes, target_rate: int = 8000) -> bytes | None:
     """Decode MP3 bytes to raw 16-bit mono PCM at target_rate using pydub."""
     try:
+        # Python 3.14 emits SyntaxWarning from pydub's internal regex strings.
+        # This keeps logs clean while we rely on pydub for MP3 decoding.
+        import warnings
+
+        warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"pydub\..*")
         from pydub import AudioSegment
 
         seg = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))

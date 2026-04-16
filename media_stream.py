@@ -404,7 +404,12 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                     conversation_history.append({"role": "assistant", "content": opening_greeting})
                     asyncio.create_task(send_audio(opening_greeting))
                 elif event == "media":
-                    await audio_queue.put(base64.b64decode(data["media"]["payload"]))
+                    media = data.get("media") or {}
+                    track = media.get("track", "inbound")
+                    if track == "inbound":
+                        payload = media.get("payload")
+                        if payload:
+                            await audio_queue.put(base64.b64decode(payload))
                 elif event == "mark":
                     print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
                 elif event == "stop":

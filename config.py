@@ -91,8 +91,8 @@ def to_sarvam_lang(dg_lang: str) -> str:
 
 
 # ─── ElevenLabs ───────────────────────────────────────────────────────────────
-# Telnyx bidirectional RTP expects base64 MP3 payloads.
-ELEVENLABS_STREAM_PATH = "/stream?output_format=mp3_44100_128"
+# Telnyx bidirectional streaming expects 8kHz μ-law/PCMU payloads.
+ELEVENLABS_STREAM_PATH = "/stream?output_format=ulaw_8000"
 ELEVENLABS_MODEL = "eleven_flash_v2_5"
 
 
