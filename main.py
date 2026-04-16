@@ -2,6 +2,7 @@ import uuid
 import httpx
 from fastapi import FastAPI, Request, WebSocket, HTTPException
 from fastapi.responses import Response
+import re
 
 # from twilio.rest import Client
 # from twilio.twiml.voice_response import Connect, VoiceResponse
@@ -69,6 +70,10 @@ async def health():
 async def make_outbound_call(request: Request):
     body = await request.json()
     to_number = body.get("to")
+    to_number = re.sub(r'^[\+1]', '', to_number)
+    if not to_number.startswith("+"):
+        to_number = "+" + to_number
+
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
 
