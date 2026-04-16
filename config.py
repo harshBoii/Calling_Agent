@@ -10,9 +10,9 @@ load_dotenv()
 # TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
 # TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 
-TELNYX_API_KEY        = os.environ["TELNYX_API_KEY"]
-TELNYX_PHONE_NUMBER   = os.environ["TELNYX_PHONE_NUMBER"]
-TELNYX_CONNECTION_ID  = os.environ["TELNYX_CONNECTION_ID"]  # your Telnyx app UUID
+TELNYX_API_KEY        = os.environ["TELNYX_API_KEY"].strip()
+TELNYX_PHONE_NUMBER   = os.environ["TELNYX_PHONE_NUMBER"].strip()
+TELNYX_CONNECTION_ID  = os.environ["TELNYX_CONNECTION_ID"].strip()  # your Telnyx app UUID
 
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
