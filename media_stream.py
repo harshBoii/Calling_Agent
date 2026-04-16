@@ -316,7 +316,45 @@ from config import (
     to_sarvam_lang,
 )
 from llm import ask_llm
-from tts import sarvam_text_to_mulaw_chunks, text_to_audio_chunks
+from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
+
+
+def _rtp_packet_to_payload(packet: bytes) -> bytes | None:
+    """
+    Telnyx sends base64-encoded RTP packets in media.payload.
+    Extract and return the RTP payload (audio) bytes.
+    """
+    if len(packet) < 12:
+        return None
+
+    b0 = packet[0]
+    version = b0 >> 6
+    if version != 2:
+        return None
+
+    padding = (b0 >> 5) & 0x01
+    extension = (b0 >> 4) & 0x01
+    csrc_count = b0 & 0x0F
+
+    header_len = 12 + (csrc_count * 4)
+    if len(packet) < header_len:
+        return None
+
+    if extension:
+        if len(packet) < header_len + 4:
+            return None
+        ext_len_words = int.from_bytes(packet[header_len + 2 : header_len + 4], "big")
+        header_len += 4 + (ext_len_words * 4)
+        if len(packet) < header_len:
+            return None
+
+    payload = packet[header_len:]
+    if padding and payload:
+        pad_count = packet[-1]
+        if 0 < pad_count <= len(payload):
+            payload = payload[: -pad_count]
+
+    return payload or None
 
 
 async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) -> None:
@@ -350,24 +388,53 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
         if use_sarvam_tts:
-            tts_stream = sarvam_text_to_mulaw_chunks(text, sarvam_tts_lang, sarvam_speaker)
+            tts_stream = sarvam_text_to_mp3_chunks(text, sarvam_tts_lang, sarvam_speaker)
         else:
             tts_stream = text_to_audio_chunks(text, el_model, voice_id)
-        async for audio_b64 in tts_stream:
+        # Telnyx limitation: media payloads can only be submitted once per second.
+        buffer = bytearray()
+        last_send = asyncio.get_event_loop().time()
+        async for mp3_bytes in tts_stream:
             if not agent_speaking:
                 print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
                 break
+            if not mp3_bytes:
+                continue
+
+            buffer.extend(mp3_bytes)
+            now = asyncio.get_event_loop().time()
+            if (now - last_send) >= 1.0 and buffer:
+                audio_b64 = base64.b64encode(bytes(buffer)).decode("utf-8")
+                buffer.clear()
+                last_send = now
+                try:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "event": "media",
+                                "media": {"payload": audio_b64},
+                            }
+                        )
+                    )
+                    chunk_count += 1
+                except Exception as e:
+                    print(f"[{call_sid}] Send error: {e}", flush=True)
+                    break
+
+        if agent_speaking and buffer:
             try:
+                audio_b64 = base64.b64encode(bytes(buffer)).decode("utf-8")
                 await websocket.send_text(
-                    json.dumps({
-                        "event": "media",
-                        "media": {"payload": audio_b64},
-                    })
+                    json.dumps(
+                        {
+                            "event": "media",
+                            "media": {"payload": audio_b64},
+                        }
+                    )
                 )
                 chunk_count += 1
             except Exception as e:
                 print(f"[{call_sid}] Send error: {e}", flush=True)
-                break
         try:
             await websocket.send_text(
                 json.dumps({
@@ -409,7 +476,13 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                     if track == "inbound":
                         payload = media.get("payload")
                         if payload:
-                            await audio_queue.put(base64.b64decode(payload))
+                            try:
+                                rtp_packet = base64.b64decode(payload)
+                                pcmu = _rtp_packet_to_payload(rtp_packet)
+                                if pcmu:
+                                    await audio_queue.put(pcmu)
+                            except Exception:
+                                pass
                 elif event == "mark":
                     print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
                 elif event == "stop":
