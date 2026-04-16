@@ -150,3 +150,8 @@ async def make_outbound_call(request: Request):
 async def media_stream(websocket: WebSocket, cfg_token: str):
     call_cfg = call_configs_by_sid.pop(cfg_token, None) or build_call_config(None)
     await run_media_stream(websocket, cfg_token, call_cfg)
+
+@app.post("/webhook")
+async def telnyx_webhook(request: Request):
+    # Telnyx call control events — handle later if needed
+    return {"ok": True}
