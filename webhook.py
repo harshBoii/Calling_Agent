@@ -2,6 +2,8 @@
 
 import asyncio
 import datetime as dt
+import hashlib
+import hmac
 import json
 import re
 import uuid
@@ -154,15 +156,28 @@ async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
     payload = build_payload(call_record, cfg, analysis)
 
     url = f"{NEXT_JS_SERVICE_URL}/api/calling-agent/webhook"
-    headers = {"Content-Type": "application/json"}
-    if WEBHOOK_SECRET:
-        headers["X-Webhook-Secret"] = WEBHOOK_SECRET
+    if not WEBHOOK_SECRET:
+        raise ValueError("WEBHOOK_SECRET is not set; cannot sign webhook request")
+
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    sig_hex = hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"),
+        raw.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-calling-agent-signature": f"sha256={sig_hex}",
+        "x-calling-agent-event-id": payload["eventId"],
+        "x-calling-agent-event-type": payload["event"],
+    }
 
     async with httpx.AsyncClient(timeout=10) as client:
         last_err: Exception | None = None
         for attempt in range(3):
             try:
-                r = await client.post(url, json=payload, headers=headers)
+                r = await client.post(url, content=raw, headers=headers)
                 r.raise_for_status()
                 print(
                     f"[WEBHOOK] delivered {payload['eventId']} "
