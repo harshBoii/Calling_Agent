@@ -124,9 +124,9 @@ async def make_outbound_call(request: Request):
             "AGENT_ROLE": cfg["agent_role"],
             "QUESTIONS_TO_ASK": cfg["questions_to_ask"],
         }
+        print(f"Request Body: {ctx}")
         cfg["system_prompt"] = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
 
-    print(f"Request Body: {ctx}")
 
     cfg["_ids"] = {
         "companyId": body.get("companyId"),
