@@ -1,4 +1,4 @@
-"""ElevenLabs & Sarvam streaming TTS → audio chunks."""
+"""ElevenLabs & Sarvam streaming TTS → audio chunks (with true streaming for barge-in support)."""
 
 import audioop
 import base64
@@ -8,9 +8,22 @@ import httpx
 
 from config import ELEVENLABS_API_KEY, SARVAM_API_KEY, elevenlabs_stream_url, to_sarvam_lang
 
+SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
+
+# ── Chunk sizes ────────────────────────────────────────────────────────────────
+# ~4 KB of MP3 ≈ 250 ms of audio at 8 kHz mono.
+# Smaller = more responsive barge-in. Larger = fewer send() calls.
+_MP3_CHUNK_BYTES = 4096
+
 
 async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
-    """Stream ElevenLabs → collect full MP3 → yield single base64 payload (Telnyx playback)."""
+    """Stream ElevenLabs TTS → yield base64-encoded MP3 chunks as they arrive.
+
+    Previously this collected the full MP3 before yielding, which blocked
+    barge-in until the entire sentence had been sent.  Now each ~4 KB chunk
+    is forwarded immediately so the send_audio() loop can check the
+    barge-in flag between every chunk (~250 ms granularity).
+    """
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
         "text": text,
@@ -29,12 +42,9 @@ async def text_to_audio_chunks(text: str, model_id: str, voice_id: str):
                 body = await response.aread()
                 print(f"[ElevenLabs] Error {response.status_code}: {body}", flush=True)
                 return
-            mp3_bytes = b""
-            async for chunk in response.aiter_bytes(chunk_size=8192):
+            async for chunk in response.aiter_bytes(chunk_size=_MP3_CHUNK_BYTES):
                 if chunk:
-                    mp3_bytes += chunk
-    if mp3_bytes:
-        yield base64.b64encode(mp3_bytes).decode("utf-8")
+                    yield base64.b64encode(chunk).decode("utf-8")
 
 
 async def sarvam_text_to_mp3_chunks(
@@ -42,7 +52,11 @@ async def sarvam_text_to_mp3_chunks(
     target_language_code: str,
     speaker: str = "rohan",
 ):
-    """Collect full Sarvam MP3 → yield single base64 payload (Telnyx playback)."""
+    """Stream Sarvam TTS → yield base64-encoded MP3 chunks as they arrive.
+
+    Previously collected the full MP3 before yielding a single payload.
+    Now each ~4 KB chunk is forwarded immediately for barge-in support.
+    """
     headers = {
         "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json",
@@ -63,15 +77,9 @@ async def sarvam_text_to_mp3_chunks(
                 body = await response.aread()
                 print(f"[Sarvam TTS] Error {response.status_code}: {body}", flush=True)
                 return
-            mp3_bytes = b""
-            async for chunk in response.aiter_bytes(chunk_size=8192):
+            async for chunk in response.aiter_bytes(chunk_size=_MP3_CHUNK_BYTES):
                 if chunk:
-                    mp3_bytes += chunk
-    if mp3_bytes:
-        yield base64.b64encode(mp3_bytes).decode("utf-8")
-
-
-SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
+                    yield base64.b64encode(chunk).decode("utf-8")
 
 
 async def sarvam_text_to_mulaw_chunks(
@@ -79,7 +87,12 @@ async def sarvam_text_to_mulaw_chunks(
     target_language_code: str,
     speaker: str = "rohan",
 ):
-    """Stream Sarvam TTS → μ-law base64 chunks for Twilio (8 kHz)."""
+    """Stream Sarvam TTS → μ-law base64 chunks for Twilio (8 kHz).
+
+    This variant is kept for Twilio compatibility. It must buffer the full
+    MP3 first (pydub decode step) then streams μ-law in 20 ms frames.
+    Barge-in still works because frames are small (320 bytes each).
+    """
     headers = {
         "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json",
@@ -107,29 +120,26 @@ async def sarvam_text_to_mulaw_chunks(
                     continue
                 mp3_buffer.write(chunk)
 
-            mp3_buffer.seek(0)
-            mp3_bytes = mp3_buffer.read()
-            if not mp3_bytes:
-                return
+    mp3_buffer.seek(0)
+    mp3_bytes = mp3_buffer.read()
+    if not mp3_bytes:
+        return
 
-            pcm_audio = _decode_mp3_to_pcm(mp3_bytes, target_rate=8000)
-            if not pcm_audio:
-                return
+    pcm_audio = _decode_mp3_to_pcm(mp3_bytes, target_rate=8000)
+    if not pcm_audio:
+        return
 
-            chunk_size = 320  # 160 samples * 2 bytes = 20 ms @ 8 kHz
-            for i in range(0, len(pcm_audio), chunk_size):
-                pcm_chunk = pcm_audio[i : i + chunk_size]
-                if pcm_chunk:
-                    yield base64.b64encode(audioop.lin2ulaw(pcm_chunk, 2)).decode("utf-8")
+    chunk_size = 320  # 160 samples * 2 bytes = 20 ms @ 8 kHz
+    for i in range(0, len(pcm_audio), chunk_size):
+        pcm_chunk = pcm_audio[i : i + chunk_size]
+        if pcm_chunk:
+            yield base64.b64encode(audioop.lin2ulaw(pcm_chunk, 2)).decode("utf-8")
 
 
 def _decode_mp3_to_pcm(mp3_bytes: bytes, target_rate: int = 8000) -> bytes | None:
     """Decode MP3 bytes to raw 16-bit mono PCM at target_rate using pydub."""
     try:
-        # Python 3.14 emits SyntaxWarning from pydub's internal regex strings.
-        # This keeps logs clean while we rely on pydub for MP3 decoding.
         import warnings
-
         warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"pydub\..*")
         from pydub import AudioSegment
 
