@@ -126,6 +126,8 @@ async def make_outbound_call(request: Request):
         }
         cfg["system_prompt"] = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
 
+    print(f"Request Body: {ctx}")
+
     cfg["_ids"] = {
         "companyId": body.get("companyId"),
         "leadId": body.get("leadId"),
@@ -157,6 +159,7 @@ async def make_outbound_call(request: Request):
         resp_body = resp.text
         print(f"[TELNYX] {resp.status_code}: {resp_body}", flush=True)
         print(f"to_number: {to_number}")
+
    
         resp.raise_for_status()
         data = resp.json()["data"]

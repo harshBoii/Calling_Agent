@@ -99,6 +99,51 @@ def _iso(ts: dt.datetime | None) -> str | None:
     return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _extract_question_answer_map(turns: list[dict]) -> dict[str, str]:
+    """
+    Build a best-effort question->answer map from transcript turns.
+
+    - Questions are extracted from agent turns by splitting on '?'.
+    - Each question is paired with the next user turn as its answer.
+    """
+    qa: dict[str, str] = {}
+    pending_questions: list[str] = []
+
+    for t in turns or []:
+        role = (t.get("role") or "").strip().lower()
+        text = (t.get("text") or "").strip()
+        if not text:
+            continue
+
+        if role == "agent":
+            if "?" not in text:
+                continue
+            parts = text.split("?")
+            for part in parts[:-1]:
+                q = part.strip()
+                if not q:
+                    continue
+                q = q + "?"
+                pending_questions.append(q)
+
+        elif role == "user":
+            if not pending_questions:
+                continue
+            ans = text
+            # Pair all pending questions to the same immediate user answer.
+            for q in pending_questions:
+                key = q
+                if key in qa:
+                    i = 2
+                    while f"{key} ({i})" in qa:
+                        i += 1
+                    key = f"{key} ({i})"
+                qa[key] = ans
+            pending_questions.clear()
+
+    return qa
+
+
 def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
     ids = cfg.get("_ids") or {}
     phone = cfg.get("_phone")
@@ -112,6 +157,7 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
         if cfg.get("use_sarvam_tts")
         else cfg.get("elevenlabs_model")
     )
+    turns = call_record.get("turns") or []
 
     return {
         "event": "call.completed",
@@ -142,10 +188,11 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
         },
         "transcript": {
             "summary": analysis.get("summary"),
-            "turns": call_record.get("turns") or [],
+            "turns": turns,
             "objections": analysis.get("objections") or [],
             "aiConfidence": analysis.get("aiConfidence"),
             "suggestedNextMove": analysis.get("suggestedNextMove"),
+            "qa": _extract_question_answer_map(turns),
         },
     }
 

@@ -404,7 +404,12 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
             pass
 
     async def receive_from_telnyx():
-        nonlocal stream_id, started_at, connected
+        nonlocal stream_id, started_at, connected, agent_speaking
+        last_barge_in_at: dt.datetime | None = None
+        # Tunables: simple RMS threshold on 8kHz PCM16 derived from PCMU.
+        # Lower => more sensitive. If you get false interrupts, increase threshold.
+        barge_in_rms_threshold = 700
+        barge_in_cooldown_sec = 0.6
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -430,7 +435,29 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                     if track == "inbound":
                         payload = media.get("payload")
                         if payload:
-                            await audio_queue.put(base64.b64decode(payload))
+                            ulaw = base64.b64decode(payload)
+                            # Immediate barge-in: detect speech energy on inbound frames.
+                            # This avoids waiting for STT latency (especially Deepgram) before interrupting TTS.
+                            if agent_speaking:
+                                try:
+                                    pcm = audioop.ulaw2lin(ulaw, 2)
+                                    rms = audioop.rms(pcm, 2)
+                                    now = dt.datetime.now(dt.timezone.utc)
+                                    cooldown_ok = (
+                                        last_barge_in_at is None
+                                        or (now - last_barge_in_at).total_seconds() >= barge_in_cooldown_sec
+                                    )
+                                    if cooldown_ok and rms >= barge_in_rms_threshold:
+                                        last_barge_in_at = now
+                                        agent_speaking = False
+                                        print(
+                                            f"[{call_sid}] ⚡ Barge-in detected (rms={rms}) — clearing",
+                                            flush=True,
+                                        )
+                                        await clear_stream()
+                                except Exception:
+                                    pass
+                            await audio_queue.put(ulaw)
                 elif event == "mark":
                     print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
                 elif event == "stop":
