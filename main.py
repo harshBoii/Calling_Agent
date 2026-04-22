@@ -109,6 +109,13 @@ async def make_outbound_call(request: Request):
     if use_dynamic and not cfg_body.get("opening_greeting"):
         cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
 
+    cfg["_ids"] = {
+        "companyId": body.get("companyId"),
+        "leadId": body.get("leadId"),
+        "campaignId": body.get("campaignId"),
+    }
+    cfg["_phone"] = to_number
+
     cfg_token = str(uuid.uuid4())
     pending_call_configs[cfg_token] = cfg
 

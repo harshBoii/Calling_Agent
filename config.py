@@ -17,6 +17,10 @@ TELNYX_CONNECTION_ID  = os.environ["TELNYX_CONNECTION_ID"].strip()  # your Telny
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 
+# ─── Next.js webhook destination ─────────────────────────────────────────────
+NEXT_JS_SERVICE_URL = os.environ["NEXT_JS_SERVICE_URL"].rstrip("/")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
 # ─── STT ──────────────────────────────────────────────────────────────────────
 DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]
 

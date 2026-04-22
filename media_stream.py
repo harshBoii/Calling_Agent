@@ -304,6 +304,7 @@ import audioop
 import base64
 import json
 import asyncio
+import datetime as dt
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from sarvamai import AsyncSarvamAI
@@ -317,6 +318,7 @@ from config import (
 )
 from llm import ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
+from webhook import send_call_completed_webhook
 
 
 async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) -> None:
@@ -343,6 +345,16 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
     transcript_buffer = []
     stream_id = None
     agent_speaking = False
+
+    started_at: dt.datetime | None = None
+    ended_at: dt.datetime | None = None
+    connected = False
+    turns: list[dict] = []
+
+    def _ts() -> float:
+        if started_at is None:
+            return 0.0
+        return round((dt.datetime.now(dt.timezone.utc) - started_at).total_seconds(), 2)
 
     async def send_audio(text: str):
         nonlocal agent_speaking
@@ -392,7 +404,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
             pass
 
     async def receive_from_telnyx():
-        nonlocal stream_id
+        nonlocal stream_id, started_at, connected
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -407,7 +419,10 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                     media_format = data.get("start", {}).get("media_format", {})
                     print(f"[{call_sid}] ⚠️ MEDIA FORMAT: {media_format}", flush=True)
                     print(f"[{call_sid}] Stream started → stream_id={stream_id} call_control_id={call_control_id}", flush=True)
+                    started_at = dt.datetime.now(dt.timezone.utc)
+                    connected = True
                     conversation_history.append({"role": "assistant", "content": opening_greeting})
+                    turns.append({"role": "agent", "text": opening_greeting, "ts": 0.0})
                     asyncio.create_task(send_audio(opening_greeting))
                 elif event == "media":
                     media = data.get("media") or {}
@@ -485,6 +500,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                                     continue
                                 print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
                                 conversation_history.append({"role": "user", "content": full_turn})
+                                turns.append({"role": "user", "text": full_turn, "ts": _ts()})
                                 agent_reply = await ask_llm(
                                     conversation_history,
                                     system_prompt,
@@ -492,6 +508,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                                     llm_model,
                                 )
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
+                                turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
                                 print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
                                 await send_audio(agent_reply)
 
@@ -580,6 +597,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
 
                                 print(f"[{call_sid}] 🎤 Human: {transcript}", flush=True)
                                 conversation_history.append({"role": "user", "content": transcript})
+                                turns.append({"role": "user", "text": transcript, "ts": _ts()})
                                 agent_reply = await ask_llm(
                                     conversation_history,
                                     system_prompt,
@@ -587,6 +605,7 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
                                     llm_model,
                                 )
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
+                                turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
                                 print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
                                 await send_audio(agent_reply)
 
@@ -600,4 +619,19 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
 
     stt_task = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
     await asyncio.gather(receive_from_telnyx(), stt_task())
+    ended_at = dt.datetime.now(dt.timezone.utc)
     print(f"[{call_sid}] Pipeline finished", flush=True)
+
+    duration_sec = int((ended_at - started_at).total_seconds()) if started_at else 0
+    call_record = {
+        "call_sid": call_sid,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "connected": connected,
+        "duration_sec": duration_sec,
+        "turns": turns,
+    }
+    try:
+        await send_call_completed_webhook(call_record, call_cfg)
+    except Exception as e:
+        print(f"[{call_sid}] Webhook dispatch error: {type(e).__name__}: {e}", flush=True)
