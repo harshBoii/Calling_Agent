@@ -15,9 +15,10 @@ from config import (
     TELNYX_API_KEY,
     TELNYX_PHONE_NUMBER,
     TELNYX_CONNECTION_ID,
+    SYSTEM_PROMPT_TEMPLATE,
     build_call_config,
 )
-from llm import generate_opening_greeting
+from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
 
 app = FastAPI()
@@ -108,6 +109,22 @@ async def make_outbound_call(request: Request):
     use_dynamic = cfg_body.get("dynamic_greeting", True)
     if use_dynamic and not cfg_body.get("opening_greeting"):
         cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
+
+    q_raw = cfg_body.get("questions_to_ask") or cfg_body.get("QUESTIONS_TO_ASK") or cfg_body.get("questions")
+    if (not q_raw or (isinstance(q_raw, str) and not q_raw.strip()) or (isinstance(q_raw, list) and not q_raw)) and not cfg_body.get("system_prompt"):
+        cfg["questions_to_ask"] = await generate_questions_to_ask(cfg, cfg["llm_provider"])
+        ctx = {
+            "LANGUAGE": cfg["language"],
+            "NAME": cfg["name"],
+            "COMPANY": cfg["company"],
+            "PRODUCT": cfg["product"],
+            "PERKS_OF_PRODUCT": cfg["perks_of_product"],
+            "INFO_ABOUT_LEAD": cfg["info_about_lead"],
+            "Agent_Name": cfg["agent_name"],
+            "AGENT_ROLE": cfg["agent_role"],
+            "QUESTIONS_TO_ASK": cfg["questions_to_ask"],
+        }
+        cfg["system_prompt"] = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
 
     cfg["_ids"] = {
         "companyId": body.get("companyId"),

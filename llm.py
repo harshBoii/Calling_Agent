@@ -1,6 +1,7 @@
 """LLM clients, greeting generation, and provider routing."""
 
 import asyncio
+import re
 
 import anthropic
 import google.generativeai as genai
@@ -16,6 +17,7 @@ from config import (
     GROQ_API_KEY,
     OPENAI_API_KEY,
     SARVAM_API_KEY,
+    QUESTIONS_TO_ASK,
 )
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -128,6 +130,101 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
     print(f"[GREETING] No LLM path for provider={p!r} (missing client or key?), using template", flush=True)
     return cfg["opening_greeting"]
+
+
+def _normalize_questions(text: str) -> list[str]:
+    lines = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        # Strip bullets / numbering.
+        s = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", s).strip()
+        if not s:
+            continue
+        # Ensure it looks like a question.
+        if not s.endswith("?"):
+            s = s + "?"
+        lines.append(s)
+    # Deduplicate while preserving order.
+    seen = set()
+    out: list[str] = []
+    for q in lines:
+        key = q.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out
+
+
+async def generate_questions_to_ask(cfg: dict, provider: str | None = None) -> str:
+    """
+    Generate 2-4 short discovery questions for a 2-minute sales call.
+    Returns a numbered string (\"1. ...\\n2. ...\").
+    """
+    p = (provider or cfg.get("llm_provider") or DEFAULT_LLM_PROVIDER).strip().lower()
+    llm_model = cfg.get("llm_model") or DEFAULT_LLM_MODELS.get(
+        p, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
+    )
+
+    prompt = f"""You are drafting discovery questions for a 2-minute outbound sales call.
+
+Context:
+- Language: {cfg.get('language')}
+- Company: {cfg.get('company')}
+- Product: {cfg.get('product')}
+- Offer: {cfg.get('perks_of_product')}
+- Lead context (use subtly): {cfg.get('info_about_lead')}
+
+Task:
+- Produce 2 to 4 short, natural questions the agent should ask early in the call.
+- Questions must be in {cfg.get('language')}.
+- Each question should be <= 12 words.
+- Avoid sounding robotic. Avoid personal/sensitive data questions.
+
+Output format:
+Return ONLY the questions, one per line. No numbering, no bullets, no extra text."""
+
+    try:
+        if p == "groq" and groq_client:
+            resp = await groq_client.chat.completions.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=160,
+            )
+            raw = resp.choices[0].message.content.strip()
+        elif p == "openai" and openai_client:
+            resp = await openai_client.chat.completions.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+            )
+            raw = resp.choices[0].message.content.strip()
+        elif p == "claude" and claude_client:
+            resp = await claude_client.messages.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+                temperature=0.6,
+            )
+            raw = resp.content[0].text.strip()
+        elif p == "gemini" and GEMINI_API_KEY:
+            gemini_model = genai.GenerativeModel(llm_model)
+            resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
+            raw = (resp.text or "").strip()
+        else:
+            raw = ""
+
+        qs = _normalize_questions(raw)
+        if len(qs) < 2:
+            raise ValueError(f"Too few questions generated: {qs}")
+        qs = qs[:4]
+        return "\n".join(f"{i+1}. {q}" for i, q in enumerate(qs))
+    except Exception as e:
+        print(f"[QUESTIONS] Generation failed ({p}): {e}", flush=True)
+        return (cfg.get("questions_to_ask") or QUESTIONS_TO_ASK).strip()
 
 
 async def ask_llm(
