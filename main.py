@@ -21,6 +21,7 @@ from config import (
 )
 from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
+from sms import send_telnyx_sms
 
 app = FastAPI()
 
@@ -56,6 +57,33 @@ def _normalize_to_e164(raw: str) -> str:
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.post("/sms/send")
+async def sms_send(request: Request):
+    """Test or external trigger: send SMS via Telnyx. JSON: to (+E164), message."""
+    body = await request.json()
+    raw_to = body.get("to")
+    raw_message = body.get("message")
+    if raw_to is None or raw_message is None:
+        raise HTTPException(status_code=400, detail="Missing 'to' or 'message'")
+    to = _normalize_to_e164(str(raw_to))
+    if not to or not _E164_RE.match(to):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {raw_to!r})",
+        )
+    message = str(raw_message).strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="'message' must be non-empty")
+
+    msg_id = await send_telnyx_sms(to, message)
+    if msg_id is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to send SMS; check server logs for Telnyx error",
+        )
+    return {"id": msg_id}
 
 
 # @app.post("/call/outbound")

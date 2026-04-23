@@ -13,6 +13,8 @@ load_dotenv()
 TELNYX_API_KEY        = os.environ["TELNYX_API_KEY"].strip()
 TELNYX_PHONE_NUMBER   = os.environ["TELNYX_PHONE_NUMBER"].strip()
 TELNYX_CONNECTION_ID  = os.environ["TELNYX_CONNECTION_ID"].strip()  # your Telnyx app UUID
+# Optional: required for many long-code / SMS send profiles in Telnyx
+TELNYX_MESSAGING_PROFILE_ID = (os.environ.get("TELNYX_MESSAGING_PROFILE_ID") or "").strip() or None
 
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
