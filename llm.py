@@ -311,3 +311,95 @@ async def ask_llm(
     except Exception as e:
         print(f"[LLM/{provider}] Error: {e}", flush=True)
         return "Sorry, give me just a moment."
+
+
+# --- Transcript analysis (webhook): needs room for structured JSON, not 150 tokens ---
+_ANALYSIS_MAX_TOKENS = 2048
+_ANALYSIS_TEMPERATURE = 0.2
+
+
+async def ask_llm_for_analysis(
+    conversation_history: list,
+    system_prompt: str,
+    provider: str,
+    model: str,
+) -> str:
+    """
+    Same routing as ask_llm but with high max_tokens and low temperature for
+    strict JSON. Raises on API failures (unlike ask_llm, which never raises).
+    """
+    p = (provider or "").strip().lower()
+
+    if p == "groq":
+        if not groq_client:
+            raise ValueError("GROQ_API_KEY not set")
+        response = await groq_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history,
+            temperature=_ANALYSIS_TEMPERATURE,
+            max_tokens=_ANALYSIS_MAX_TOKENS,
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    if p == "openai":
+        if not openai_client:
+            raise ValueError("OPENAI_API_KEY not set")
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history,
+            temperature=_ANALYSIS_TEMPERATURE,
+            max_tokens=_ANALYSIS_MAX_TOKENS,
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    if p == "claude":
+        if not claude_client:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        response = await claude_client.messages.create(
+            model=model,
+            system=system_prompt,
+            messages=conversation_history,
+            max_tokens=_ANALYSIS_MAX_TOKENS,
+            temperature=_ANALYSIS_TEMPERATURE,
+        )
+        return response.content[0].text.strip()
+
+    if p == "gemini":
+        if not GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY not set")
+        gemini_model = genai.GenerativeModel(
+            model_name=model,
+            system_instruction=system_prompt,
+        )
+        gem_hist = []
+        for msg in conversation_history:
+            role = "user" if msg["role"] == "user" else "model"
+            gem_hist.append({"role": role, "parts": [msg["content"]]})
+        chat = gemini_model.start_chat(history=gem_hist[:-1] if gem_hist else [])
+        last_msg = gem_hist[-1]["parts"][0] if gem_hist else ""
+        gen_cfg = {
+            "max_output_tokens": _ANALYSIS_MAX_TOKENS,
+            "temperature": _ANALYSIS_TEMPERATURE,
+        }
+        response = await asyncio.to_thread(
+            chat.send_message, last_msg, generation_config=gen_cfg
+        )
+        return (response.text or "").strip()
+
+    if p == "sarvam":
+        if not sarvam_client:
+            raise ValueError("SARVAM_API_KEY not set")
+        messages = [{"role": "system", "content": system_prompt}] + list(conversation_history)
+        text = await _sarvam_call(
+            model=model,
+            messages=messages,
+            temperature=_ANALYSIS_TEMPERATURE,
+            max_tokens=_ANALYSIS_MAX_TOKENS,
+        )
+        if not text:
+            raise ValueError("Sarvam returned empty response")
+        return text.strip()
+
+    raise ValueError(
+        f"Unknown LLM provider: '{provider}'. Use groq | openai | claude | gemini | sarvam"
+    )

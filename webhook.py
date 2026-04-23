@@ -11,7 +11,7 @@ import uuid
 import httpx
 
 from config import NEXT_JS_SERVICE_URL, WEBHOOK_SECRET
-from llm import ask_llm
+from llm import ask_llm_for_analysis
 
 
 _ANALYSIS_SYSTEM_PROMPT = (
@@ -28,7 +28,9 @@ _ANALYSIS_SYSTEM_PROMPT = (
     '  - "objections" (array of strings): short phrases describing objections the lead raised.\n'
     '  - "aiConfidence" (number): 0.0 to 1.0, your confidence in this classification.\n'
     '  - "suggestedNextMove" (string): concrete next action the sales team should take.\n\n'
-    "Respond with JSON only. No explanation."
+    "Rules: respond with a single JSON object only. Put all string values on one line; "
+    "escape any double quote inside a string as \\\". Do not use markdown. "
+    "If uncertain about followUpAt, use null."
 )
 
 
@@ -40,15 +42,54 @@ def _strip_code_fences(text: str) -> str:
     return s.strip()
 
 
+def _extract_first_json_object(s: str) -> str | None:
+    """Find the first top-level balanced {...} honoring strings and escapes."""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
+
+
 def _parse_json_strict(raw: str) -> dict:
     s = _strip_code_fences(raw)
-    # Fallback: pull the first {...} block if the model wrapped it in prose.
-    if not s.startswith("{"):
-        m = re.search(r"\{.*\}", s, re.DOTALL)
-        if not m:
-            raise ValueError("No JSON object found in LLM response")
-        s = m.group(0)
-    obj = json.loads(s)
+    if not s.strip():
+        raise ValueError("Empty LLM response")
+
+    candidates: list[str] = []
+    for c in (s, _extract_first_json_object(s)):
+        if c and c.strip() and c not in candidates:
+            candidates.append(c)
+    obj = None
+    last_json_err: Exception | None = None
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            break
+        except json.JSONDecodeError as e:
+            last_json_err = e
+    if obj is None:
+        raise ValueError(f"No valid JSON in LLM response: {last_json_err}")
     required = {
         "summary",
         "outcome",
@@ -64,6 +105,13 @@ def _parse_json_strict(raw: str) -> dict:
         raise ValueError(f"Analysis JSON missing keys: {missing}")
     if not isinstance(obj["objections"], list):
         raise ValueError("'objections' must be a list")
+    fup = obj.get("followUpAgreed")
+    if isinstance(fup, str):
+        low = fup.strip().lower()
+        if low == "true":
+            obj["followUpAgreed"] = True
+        elif low == "false":
+            obj["followUpAgreed"] = False
     if not isinstance(obj["followUpAgreed"], bool):
         raise ValueError("'followUpAgreed' must be a boolean")
     if obj["followUpAt"] is not None and not isinstance(obj["followUpAt"], str):
@@ -100,14 +148,22 @@ async def analyze_transcript(turns: list[dict], cfg: dict, *, call_ended_at: dt.
 
     last_err: Exception | None = None
     for attempt in range(3):
+        raw: str | None = None
         try:
-            raw = await ask_llm(user_msg, _ANALYSIS_SYSTEM_PROMPT, provider, model)
+            raw = await ask_llm_for_analysis(
+                user_msg, _ANALYSIS_SYSTEM_PROMPT, provider, model
+            )
             if not raw or raw.strip().lower().startswith("sorry, give me"):
                 raise ValueError(f"LLM returned fallback/empty: {raw!r}")
             return _parse_json_strict(raw)
         except Exception as e:
             last_err = e
             print(f"[WEBHOOK] analyze attempt {attempt + 1}/3 failed: {e}", flush=True)
+            if raw and raw.strip():
+                print(
+                    f"[WEBHOOK] raw model output (up to 2000 chars): {raw[:2000]!r}",
+                    flush=True,
+                )
             await asyncio.sleep(0.3 * (2 ** attempt))
 
     print(f"[WEBHOOK] analyze gave up after 3 tries; last error: {last_err}", flush=True)
