@@ -17,6 +17,7 @@ from config import (
     TELNYX_CONNECTION_ID,
     SYSTEM_PROMPT_TEMPLATE,
     build_call_config,
+    prepend_previous_chat_context,
 )
 from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
@@ -126,7 +127,10 @@ async def make_outbound_call(request: Request):
         }
         print(f"Request Body: {ctx}")
         cfg["system_prompt"] = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
-
+        cfg["system_prompt"] = prepend_previous_chat_context(
+            cfg["system_prompt"],
+            cfg.get("previous_chat_context"),
+        )
 
     cfg["_ids"] = {
         "companyId": body.get("companyId"),

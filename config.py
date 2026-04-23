@@ -168,6 +168,24 @@ def _format_vars(*, language, name, company, product, perks_of_product, info_abo
     }
 
 
+def prepend_previous_chat_context(
+    system_prompt: str, previous_chat_context: str | None
+) -> str:
+    if not previous_chat_context or not str(previous_chat_context).strip():
+        return system_prompt
+    text = str(previous_chat_context).strip()
+    return f"## Previous Chat Context\n{text}\n\n{system_prompt}"
+
+
+def _normalize_previous_chat_context(raw) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raw = str(raw)
+    s = raw.strip()
+    return s if s else None
+
+
 def build_call_config(body: dict | None) -> dict:
     print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
     b = body or {}
@@ -222,7 +240,13 @@ def build_call_config(body: dict | None) -> dict:
         }
     )
 
+    previous_chat_context = _normalize_previous_chat_context(
+        b.get("previousChatContext")
+    )
     system_prompt = b.get("system_prompt") or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+    system_prompt = prepend_previous_chat_context(
+        system_prompt, previous_chat_context
+    )
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
     res = {
         "language": language,
@@ -236,6 +260,7 @@ def build_call_config(body: dict | None) -> dict:
         "perks_of_product": perks,
         "info_about_lead": lead_info,
         "system_prompt": system_prompt,
+        "previous_chat_context": previous_chat_context,
         "opening_greeting": opening_greeting,
         "agent_name": agent_name,
         "agent_role": agent_role,
