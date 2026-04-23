@@ -22,6 +22,8 @@ _ANALYSIS_SYSTEM_PROMPT = (
     '  - "summary" (string): 1-3 sentence summary of the call.\n'
     '  - "outcome" (string): one of '
     "INTERESTED, NOT_INTERESTED, CALLBACK, VOICEMAIL, NO_ANSWER, DO_NOT_CALL, UNKNOWN.\n"
+    '  - "followUpAgreed" (boolean): true if the lead explicitly agreed to a follow-up call or scheduled callback; otherwise false.\n'
+    '  - "followUpAt" (string|null): the scheduled follow-up time as an ISO-8601 UTC timestamp (e.g. "2026-04-23T15:30:00Z") if the time can be determined; otherwise null.\n'
     '  - "sentiment" (string): one of POSITIVE, NEUTRAL, NEGATIVE.\n'
     '  - "objections" (array of strings): short phrases describing objections the lead raised.\n'
     '  - "aiConfidence" (number): 0.0 to 1.0, your confidence in this classification.\n'
@@ -47,12 +49,25 @@ def _parse_json_strict(raw: str) -> dict:
             raise ValueError("No JSON object found in LLM response")
         s = m.group(0)
     obj = json.loads(s)
-    required = {"summary", "outcome", "sentiment", "objections", "aiConfidence", "suggestedNextMove"}
+    required = {
+        "summary",
+        "outcome",
+        "followUpAgreed",
+        "followUpAt",
+        "sentiment",
+        "objections",
+        "aiConfidence",
+        "suggestedNextMove",
+    }
     missing = required - set(obj.keys())
     if missing:
         raise ValueError(f"Analysis JSON missing keys: {missing}")
     if not isinstance(obj["objections"], list):
         raise ValueError("'objections' must be a list")
+    if not isinstance(obj["followUpAgreed"], bool):
+        raise ValueError("'followUpAgreed' must be a boolean")
+    if obj["followUpAt"] is not None and not isinstance(obj["followUpAt"], str):
+        raise ValueError("'followUpAt' must be a string or null")
     return obj
 
 
@@ -60,6 +75,8 @@ def _default_analysis() -> dict:
     return {
         "summary": None,
         "outcome": "UNKNOWN",
+        "followUpAgreed": False,
+        "followUpAt": None,
         "sentiment": None,
         "objections": [],
         "aiConfidence": None,
@@ -67,13 +84,17 @@ def _default_analysis() -> dict:
     }
 
 
-async def analyze_transcript(turns: list[dict], cfg: dict) -> dict:
+async def analyze_transcript(turns: list[dict], cfg: dict, *, call_ended_at: dt.datetime | None = None) -> dict:
     """Run an LLM analysis pass over the transcript turns, with 3 retries."""
     if not turns:
         return _default_analysis()
 
+    ended_at_iso = _iso(call_ended_at) if call_ended_at else None
     transcript_text = "\n".join(f"{t['role']}: {t['text']}" for t in turns)
-    user_msg = [{"role": "user", "content": transcript_text}]
+    # Provide a reference timestamp so the model can resolve relative times like
+    # "tomorrow at 3" into an absolute ISO-8601 UTC timestamp when possible.
+    meta = f"Call ended at (UTC): {ended_at_iso}\n" if ended_at_iso else ""
+    user_msg = [{"role": "user", "content": f"{meta}\nTranscript:\n{transcript_text}".strip()}]
     provider = cfg["llm_provider"]
     model = cfg["llm_model"]
 
@@ -175,6 +196,8 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
             "durationSec": duration_sec,
             "connected": connected,
             "outcome": analysis.get("outcome"),
+            "followUpAgreed": bool(analysis.get("followUpAgreed")),
+            "followUpAt": analysis.get("followUpAt"),
             "sentiment": analysis.get("sentiment"),
             "costCents": None,
             "recordingUrl": None,
@@ -199,7 +222,11 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
 
 async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
     """Analyze the transcript and POST the call-completed event to the Next.js service."""
-    analysis = await analyze_transcript(call_record.get("turns") or [], cfg)
+    analysis = await analyze_transcript(
+        call_record.get("turns") or [],
+        cfg,
+        call_ended_at=call_record.get("ended_at"),
+    )
     payload = build_payload(call_record, cfg, analysis)
 
     url = f"{NEXT_JS_SERVICE_URL}/api/calling-agent/webhook"
