@@ -8,6 +8,7 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from sarvamai import AsyncSarvamAI
 
+from arq_jobs import done_key
 from config import (
     DEEPGRAM_API_KEY,
     MIN_WORDS_TO_RESPOND,
@@ -20,7 +21,14 @@ from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook
 
 
-async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) -> None:
+async def run_media_stream(
+    websocket: WebSocket,
+    call_sid: str,
+    call_cfg: dict,
+    *,
+    redis_client=None,
+    cfg_token: str | None = None,
+) -> None:
     await websocket.accept()
     print(f"[{call_sid}] Telnyx WebSocket connected", flush=True)
 
@@ -383,6 +391,15 @@ async def run_media_stream(websocket: WebSocket, call_sid: str, call_cfg: dict) 
     await asyncio.gather(receive_from_telnyx(), stt_task())
     ended_at = dt.datetime.now(dt.timezone.utc)
     print(f"[{call_sid}] Pipeline finished", flush=True)
+
+    if redis_client and cfg_token:
+        try:
+            await redis_client.rpush(done_key(cfg_token), "1")
+        except Exception as e:
+            print(
+                f"[{call_sid}] call:done signal error: {type(e).__name__}: {e}",
+                flush=True,
+            )
 
     duration_sec = int((ended_at - started_at).total_seconds()) if started_at else 0
     call_record = {

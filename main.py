@@ -1,20 +1,21 @@
-import uuid
-import httpx
-from fastapi import FastAPI, Request, WebSocket, HTTPException
-from fastapi.responses import Response
+import json
 import re
+import time
+import uuid
+from contextlib import asynccontextmanager
 
-# from twilio.rest import Client
-# from twilio.twiml.voice_response import Connect, VoiceResponse
+import redis.asyncio as aioredis
+from arq import create_pool
+from arq.connections import RedisSettings
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 
+from arq_jobs import cfg_key, set_call_status, start_key, status_key
 from config import (
-    PUBLIC_BASE_URL,
-    # TWILIO_ACCOUNT_SID,
-    # TWILIO_AUTH_TOKEN,
-    # TWILIO_PHONE_NUMBER,
-    TELNYX_API_KEY,
-    TELNYX_PHONE_NUMBER,
-    TELNYX_CONNECTION_ID,
+    CAMPAIGN_QUEUE,
+    CFG_TTL_SEC,
+    ON_DEMAND_DEADLINE_SEC,
+    ONCALL_QUEUE,
+    REDIS_URL,
     SYSTEM_PROMPT_TEMPLATE,
     build_call_config,
     prepend_previous_chat_context,
@@ -23,15 +24,25 @@ from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
 from sms import send_telnyx_sms
 
-app = FastAPI()
-
-# twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-# ─── Call config store ────────────────────────────────────────────────────────
-pending_call_configs: dict[str, dict] = {}
-call_configs_by_sid: dict[str, dict] = {}
+arq_pool = None
+redis_client: aioredis.Redis | None = None
 
 _E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global arq_pool, redis_client
+    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+    yield
+    await arq_pool.close()
+    await redis_client.aclose()
+    arq_pool = None
+    redis_client = None
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def _normalize_to_e164(raw: str) -> str:
@@ -39,11 +50,9 @@ def _normalize_to_e164(raw: str) -> str:
     if not s:
         return ""
 
-    # Allow "00" international prefix.
     if s.startswith("00"):
         s = "+" + s[2:]
 
-    # Strip formatting characters/spaces, keep digits and a leading "+".
     if s.startswith("+"):
         s = "+" + re.sub(r"\D", "", s[1:])
     else:
@@ -57,6 +66,16 @@ def _normalize_to_e164(raw: str) -> str:
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/call/status/{cfg_token}")
+async def call_status(cfg_token: str):
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    status = await redis_client.get(status_key(cfg_token))
+    if status is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {"cfg_token": cfg_token, "status": status}
 
 
 @app.post("/sms/send")
@@ -86,40 +105,11 @@ async def sms_send(request: Request):
     return {"id": msg_id}
 
 
-# @app.post("/call/outbound")
-# async def make_outbound_call(request: Request):
-#     body = await request.json()
-#     print(f"[OUTBOUND] Body: {body}", flush=True)
-#     to_number = body.get("to")
-#     if not to_number:
-#         raise HTTPException(status_code=400, detail="Missing 'to' number")
-
-#     cfg_body = {k: v for k, v in body.items() if k != "to"}
-#     cfg = build_call_config(cfg_body)
-
-#     use_dynamic = cfg_body.get("dynamic_greeting", True)
-#     if use_dynamic and not cfg_body.get("opening_greeting"):
-#         cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
-#         print(f"[GREETING] {cfg['opening_greeting']}", flush=True)
-
-#     cfg_token = str(uuid.uuid4())
-#     pending_call_configs[cfg_token] = cfg
-
-#     call = twilio_client.calls.create(
-#         to=to_number,
-#         from_=TWILIO_PHONE_NUMBER,
-#         url=f"{PUBLIC_BASE_URL}/voice/incoming?cfg={cfg_token}",
-#         method="POST",
-#     )
-#     print(f"[{call.sid}] Outbound → {to_number} | LLM={cfg['llm_provider']}/{cfg['llm_model']}", flush=True)
-#     return {
-#         "call_sid": call.sid,
-#         "status": call.status,
-#         "opening_greeting": cfg["opening_greeting"],
-#     }
-
 @app.post("/call/outbound")
 async def make_outbound_call(request: Request):
+    if arq_pool is None or redis_client is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
     body = await request.json()
     raw_to = body.get("to")
     if not raw_to:
@@ -132,6 +122,13 @@ async def make_outbound_call(request: Request):
             detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {raw_to!r})",
         )
 
+    call_type = body.get("call_type", "campaign")
+    if call_type not in ("on_demand", "campaign"):
+        raise HTTPException(
+            status_code=400,
+            detail="call_type must be 'on_demand' or 'campaign'",
+        )
+
     cfg_body = {k: v for k, v in body.items() if k != "to"}
     cfg = build_call_config(cfg_body)
 
@@ -139,8 +136,19 @@ async def make_outbound_call(request: Request):
     if use_dynamic and not cfg_body.get("opening_greeting"):
         cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
 
-    q_raw = cfg_body.get("questions_to_ask") or cfg_body.get("QUESTIONS_TO_ASK") or cfg_body.get("questions")
-    if (not q_raw or (isinstance(q_raw, str) and not q_raw.strip()) or (isinstance(q_raw, list) and not q_raw)) and not cfg_body.get("system_prompt"):
+    q_raw = (
+        cfg_body.get("questions_to_ask")
+        or cfg_body.get("QUESTIONS_TO_ASK")
+        or cfg_body.get("questions")
+    )
+    if (
+        (
+            not q_raw
+            or (isinstance(q_raw, str) and not q_raw.strip())
+            or (isinstance(q_raw, list) and not q_raw)
+        )
+        and not cfg_body.get("system_prompt")
+    ):
         cfg["questions_to_ask"] = await generate_questions_to_ask(cfg, cfg["llm_provider"])
         ctx = {
             "LANGUAGE": cfg["language"],
@@ -166,83 +174,74 @@ async def make_outbound_call(request: Request):
         "campaignId": body.get("campaignId"),
     }
     cfg["_phone"] = to_number
+    cfg["call_type"] = call_type
+    cfg["_enqueue_time"] = time.time()
 
     cfg_token = str(uuid.uuid4())
-    pending_call_configs[cfg_token] = cfg
+    await redis_client.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
+    await set_call_status(redis_client, cfg_token, "queued")
 
-    ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+    queue = ONCALL_QUEUE if call_type == "on_demand" else CAMPAIGN_QUEUE
+    job = await arq_pool.enqueue_job("run_call_job", cfg_token, _queue_name=queue)
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://api.telnyx.com/v2/calls",
-            headers={
-                "Authorization": f"Bearer {TELNYX_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "connection_id": TELNYX_CONNECTION_ID,
-                "to": to_number,
-                "from": TELNYX_PHONE_NUMBER,
-                "stream_url": f"{ws_base}/media-stream/{cfg_token}",
-                "stream_track": "inbound_track",
-                 "stream_codec": "PCMU"
-            },
+    if call_type == "campaign":
+        return {
+            "status": "queued",
+            "cfg_token": cfg_token,
+            "job_id": job.job_id,
+        }
+
+    result = await redis_client.blpop(start_key(cfg_token), timeout=ON_DEMAND_DEADLINE_SEC)
+    if result is None:
+        try:
+            await job.abort()
+        except Exception as e:
+            print(f"[OUTBOUND {cfg_token}] job.abort failed: {e}", flush=True)
+        await set_call_status(redis_client, cfg_token, "expired")
+        raise HTTPException(
+            status_code=503,
+            detail="Agent busy, try again shortly",
         )
-        resp_body = resp.text
-        print(f"[TELNYX] {resp.status_code}: {resp_body}", flush=True)
-        print(f"to_number: {to_number}")
 
-   
-        resp.raise_for_status()
-        data = resp.json()["data"]
-
-    call_control_id = data["call_control_id"]
-
-    call_configs_by_sid[cfg_token] = cfg              
-
-    # call_configs_by_sid[call_control_id] = cfg
-    # pending_call_configs.pop(cfg_token, None)
+    _key, payload_raw = result
+    payload = json.loads(payload_raw)
+    if payload.get("error"):
+        await set_call_status(redis_client, cfg_token, payload["error"])
+        raise HTTPException(
+            status_code=503,
+            detail="Agent busy, try again shortly",
+        )
 
     return {
-        "call_control_id": call_control_id,
+        "call_control_id": payload["call_control_id"],
         "status": "initiated",
-        "opening_greeting": cfg["opening_greeting"],
+        "opening_greeting": payload.get("opening_greeting", cfg["opening_greeting"]),
+        "cfg_token": cfg_token,
+        "job_id": job.job_id,
     }
 
 
-# @app.post("/voice/incoming")
-# async def incoming_call(request: Request):
-#     form = await request.form()
-#     params = dict(form)
-#     call_sid = params.get("CallSid", "unknown")
-#     caller = params.get("From", "unknown")
-#     cfg_token = request.query_params.get("cfg")
-#     if cfg_token and cfg_token in pending_call_configs:
-#         call_configs_by_sid[call_sid] = pending_call_configs.pop(cfg_token)
-#     print(f"[{call_sid}] Incoming call from {caller}", flush=True)
-#     ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
-#     response = VoiceResponse()
-#     connect = Connect()
-#     connect.stream(
-#         url=f"{ws_base}/media-stream/{call_sid}",
-#         name="voice-agent-stream",
-#         track="inbound_track",
-#     )
-#     response.append(connect)
-#     return Response(content=str(response), media_type="application/xml")
-
-
-# @app.websocket("/media-stream/{call_sid}")
-# async def media_stream(websocket: WebSocket, call_sid: str):
-#     call_cfg = call_configs_by_sid.pop(call_sid, None) or build_call_config(None)
-#     await run_media_stream(websocket, call_sid, call_cfg)
-
 @app.websocket("/media-stream/{cfg_token}")
 async def media_stream(websocket: WebSocket, cfg_token: str):
-    call_cfg = call_configs_by_sid.pop(cfg_token, None) or build_call_config(None)
-    await run_media_stream(websocket, cfg_token, call_cfg)
+    if redis_client is None:
+        await websocket.close(code=1011)
+        return
+
+    raw_cfg = await redis_client.get(cfg_key(cfg_token))
+    if raw_cfg:
+        call_cfg = json.loads(raw_cfg)
+    else:
+        call_cfg = build_call_config(None)
+
+    await run_media_stream(
+        websocket,
+        cfg_token,
+        call_cfg,
+        redis_client=redis_client,
+        cfg_token=cfg_token,
+    )
+
 
 @app.post("/webhook")
 async def telnyx_webhook(request: Request):
-    # Telnyx call control events — handle later if needed
     return {"ok": True}

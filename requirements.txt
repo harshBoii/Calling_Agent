@@ -12,3 +12,5 @@ openai
 google-generativeai
 sarvamai
 pydub
+arq
+redis

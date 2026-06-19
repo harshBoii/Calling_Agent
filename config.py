@@ -19,6 +19,16 @@ TELNYX_MESSAGING_PROFILE_ID = (os.environ.get("TELNYX_MESSAGING_PROFILE_ID") or 
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 
+# ─── Redis / Arq ──────────────────────────────────────────────────────────────
+REDIS_URL = os.environ["REDIS_URL"].strip()
+
+ONCALL_QUEUE = "calls:oncall"
+CAMPAIGN_QUEUE = "calls:campaign"
+CFG_TTL_SEC = 3600
+STATUS_TTL_SEC = 86400
+ON_DEMAND_DEADLINE_SEC = 15
+CALL_DONE_TIMEOUT_SEC = 14400
+
 # ─── Next.js webhook destination ─────────────────────────────────────────────
 NEXT_JS_SERVICE_URL = os.environ["NEXT_JS_SERVICE_URL"].rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
