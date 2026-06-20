@@ -109,6 +109,17 @@ class Compliance(BaseModel):
     optOutSetsDncFlag: bool = True
 
 
+class MeetSlot(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    startAt: str
+    endAt: str
+    label: str
+    durationMin: int | None = None
+    timezone: str | None = None
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -158,6 +169,7 @@ class OutboundCallRequest(BaseModel):
     stt_provider: str | None = None
     use_sarvam_tts: bool = False
     sarvam_speaker: str | None = None
+    available_meet_slots: list[MeetSlot] = Field(default_factory=list)
     agent_config: AgentConfig | None = None
 
     def to_cfg_body(self) -> dict[str, Any]:

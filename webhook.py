@@ -241,12 +241,15 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
         else cfg.get("elevenlabs_model")
     )
     turns = call_record.get("turns") or []
+    conv = cfg.get("_conversation_state") or cfg.get("conversation_metadata") or {}
+    meet_scheduled = conv.get("meetScheduled") or conv.get("meet_scheduled")
 
     return {
         "event": "call.completed",
         "eventId": f"evt_{uuid.uuid4().hex}",
         "occurredAt": _iso(ended_at),
         "companyId": ids.get("companyId"),
+        "meet_scheduled": meet_scheduled,
         "call": {
             "externalCallId": call_record.get("call_sid"),
             "leadId": ids.get("leadId"),
@@ -260,6 +263,7 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
             "outcome": analysis.get("outcome"),
             "followUpAgreed": bool(analysis.get("followUpAgreed")),
             "followUpAt": analysis.get("followUpAt"),
+            "meet_scheduled": meet_scheduled,
             "sentiment": analysis.get("sentiment"),
             "costCents": None,
             "recordingUrl": None,

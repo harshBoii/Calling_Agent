@@ -218,7 +218,7 @@ def _normalize_previous_chat_context(raw) -> str | None:
 
 
 def build_call_config(body: dict | None) -> dict:
-    from agent_config import build_base_system_prompt, parse_and_merge
+    from agent_config import build_base_system_prompt, normalize_meet_slots, parse_and_merge
 
     print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
     agent_config, b = parse_and_merge(body)
@@ -341,6 +341,7 @@ def build_call_config(body: dict | None) -> dict:
         "sarvam_speaker": sarvam_speaker,
         "agent_config": agent_config,
         "dynamic_greeting": b.get("dynamic_greeting", True),
+        "available_meet_slots": normalize_meet_slots(b.get("available_meet_slots")),
     }
     print(f"Config: {res}")
 

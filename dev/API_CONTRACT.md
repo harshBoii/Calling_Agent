@@ -132,6 +132,22 @@ Places an AI voice call via Telnyx. Conversation runs over WebSocket on this ser
 | `use_sarvam_tts` | no | boolean | |
 | `sarvam_speaker` | no | string | |
 | `agent_config` | no | object | Structured agent behavior (see below). Optional — legacy flat fields still work alone. |
+| `available_meet_slots` | no | array | Pre-fetched meeting slots for `slot_suggestion` stage (see below). When provided, calendar stub is skipped. |
+
+#### `available_meet_slots` (optional)
+
+Array of slot objects supplied by your backend (e.g. from calendar integration). Used during `slot_suggestion` instead of the internal calendar stub.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | string | Slot identifier (ISO start time or external id) |
+| `startAt` | string | ISO-8601 UTC start |
+| `endAt` | string | ISO-8601 UTC end |
+| `label` | string | Spoken label, e.g. `"Tue, Jun 24, 2:00 PM UTC"` |
+| `durationMin` | number | Optional duration in minutes |
+| `timezone` | string | Optional timezone label |
+
+When the lead picks a slot, `call.completed` webhook includes top-level and `call.meet_scheduled`, e.g. `"Tue Jun 24 2:00 PM"`.
 
 #### `agent_config` (optional)
 
@@ -152,7 +168,7 @@ When present, drives conversation stages, guardrails, objections, compliance, an
 | `objectionHandling` | Objection library injected into prompt; max attempts → soft close + end call |
 | `behavioralGuardrails` | Hard `maxSentencesPerTurn` cap; escalation triggers (anger: one retry then exit; human request: immediate exit) |
 | `compliance` | AI disclosure prepended to greeting; `maxCallDurationSec` timer; opt-out phrase ends call + sets DNC flag |
-| `bookingClose` | At `slot_suggestion` stage, fetches slots via calendar stub using `calendarSourceId` |
+| `bookingClose` | At `slot_suggestion` stage, offers slots from `available_meet_slots` when provided; otherwise calendar stub via `calendarSourceId` |
 | `personalization.enabledPresetIds` | Suggestive hints only (not enforced) |
 
 If both `system_prompt` and `agent_config` are sent, custom prompt is used **and** agent_config rules are appended.
@@ -246,6 +262,7 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
   "eventId": "evt_a1b2c3d4e5f6...",
   "occurredAt": "2026-06-19T12:34:56.789Z",
   "companyId": "cmp_abc",
+  "meet_scheduled": "Tuesday June 24 at 2:00 PM",
   "call": {
     "externalCallId": "550e8400-e29b-41d4-a716-446655440000",
     "leadId": "lead_xyz",
@@ -259,6 +276,7 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
     "outcome": "INTERESTED",
     "followUpAgreed": true,
     "followUpAt": "2026-06-20T15:30:00Z",
+    "meet_scheduled": "Tuesday June 24 at 2:00 PM",
     "sentiment": "POSITIVE",
     "costCents": null,
     "recordingUrl": null,
@@ -272,9 +290,11 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
       "escalationReason": null,
       "dncRequested": false,
       "calendarSourceId": "cal_primary_001",
-      "offeredSlots": ["Tuesday 10:00 AM UTC"],
+      "offeredSlots": ["Tue, Jun 24, 2:00 PM UTC", "Tue, Jun 24, 2:30 PM UTC"],
+      "selectedSlotId": "2026-06-24T14:00:00.000Z",
+      "meetScheduled": "Tue Jun 24 2:00 PM",
       "objectionAttempts": 0,
-      "bookingConfirmed": false
+      "bookingConfirmed": true
     }
   },
   "transcript": {

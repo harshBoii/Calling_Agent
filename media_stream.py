@@ -173,6 +173,14 @@ async def run_media_stream(
                 session.sync_to_cfg()
                 return
 
+            session.ensure_offered_slots()
+
+            if session.current_stage_key == "slot_suggestion":
+                session.detect_slot_selection(user_text)
+            elif session.current_stage_key == "confirmation":
+                session.detect_slot_selection(user_text)
+                session.maybe_confirm_booking(user_text)
+
             session.advance_stage(user_text)
 
             if (
@@ -185,6 +193,7 @@ async def run_media_stream(
                 session.offered_slots = await default_calendar_provider.get_available_slots(
                     source_id, count
                 )
+                session.offered_slot_records = []
 
             turn_prompt = session.build_turn_prompt(base_system_prompt)
             if objection_hint:

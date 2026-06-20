@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import datetime as dt
+
 from schemas.outbound_call import AgentConfig, ConversationStage, OutboundCallRequest
 
 # ─── Keyword heuristics for stage routing ─────────────────────────────────────
@@ -95,6 +97,49 @@ _EXIT_ACK_KEYWORDS = [
     "theek",
     "thik",
 ]
+
+_SLOT_ORDINALS = [
+    ("first", 0),
+    ("1st", 0),
+    ("pehla", 0),
+    ("pehle", 0),
+    ("second", 1),
+    ("2nd", 1),
+    ("dusra", 1),
+    ("dusre", 1),
+    ("doosra", 1),
+]
+
+
+def _format_meet_scheduled(slot: dict) -> str:
+    """Human-readable meeting time for webhook, e.g. Tuesday June 24 at 2:00 PM."""
+    label = (slot.get("label") or "").strip()
+    if label:
+        # Drop trailing timezone token for cleaner webhook value when present.
+        cleaned = re.sub(r"\s+(UTC|IST|GMT.*)$", "", label, flags=re.IGNORECASE)
+        cleaned = cleaned.replace(",", "")
+        return cleaned.strip()
+    start_at = slot.get("startAt") or slot.get("id")
+    if not start_at:
+        return ""
+    try:
+        ts = start_at.replace("Z", "+00:00")
+        dt_val = dt.datetime.fromisoformat(ts)
+        return dt_val.strftime("%A %B %d at %I:%M %p").lstrip("0").replace(" 0", " ")
+    except ValueError:
+        return str(start_at)
+
+
+def normalize_meet_slots(raw: list | None) -> list[dict]:
+    if not raw:
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict):
+            out.append(item)
+        elif hasattr(item, "model_dump"):
+            out.append(item.model_dump())
+    return out
 
 
 def _resolve_role_framing(role: str | None, company: str) -> str:
@@ -381,9 +426,14 @@ class ConversationSession:
         self.escalation_reason: str | None = None
         self.dnc_requested = False
         self.call_should_end = False
+        self.available_slots: list[dict] = normalize_meet_slots(
+            call_cfg.get("available_meet_slots")
+        )
         self.offered_slots: list[str] = []
+        self.offered_slot_records: list[dict] = []
+        self.selected_slot_id: str | None = None
+        self.meet_scheduled: str | None = None
         self.booking_confirmed = False
-        self.pending_exit_line: str | None = None
 
     @property
     def current_stage_key(self) -> str:
@@ -395,6 +445,76 @@ class ConversationSession:
         if not self.stages:
             return None
         return self.stages[min(self.stage_index, len(self.stages) - 1)]
+
+    def _slots_to_offer_count(self) -> int:
+        ac = self.call_cfg.get("agent_config") or {}
+        booking = ac.get("bookingClose") or {}
+        return int(booking.get("slotsToOffer") or 2)
+
+    def ensure_offered_slots(self) -> None:
+        """Populate offered slots from request payload or keep existing."""
+        if self.offered_slots:
+            return
+        count = self._slots_to_offer_count()
+        if self.available_slots:
+            picked = self.available_slots[:count]
+            self.offered_slot_records = picked
+            self.offered_slots = [
+                (s.get("label") or _format_meet_scheduled(s)).strip() for s in picked
+            ]
+            return
+        self.offered_slot_records = []
+
+    def set_offered_slots_from_labels(self, labels: list[str]) -> None:
+        self.offered_slots = labels
+        self.offered_slot_records = []
+
+    def detect_slot_selection(self, user_text: str) -> str | None:
+        """Match user reply to an offered slot; sets meet_scheduled when found."""
+        if not self.offered_slot_records and not self.offered_slots:
+            return None
+
+        low = user_text.lower()
+
+        for ordinal, idx in _SLOT_ORDINALS:
+            if ordinal in low and idx < len(self.offered_slot_records):
+                slot = self.offered_slot_records[idx]
+                self.selected_slot_id = slot.get("id")
+                self.meet_scheduled = _format_meet_scheduled(slot)
+                self.booking_confirmed = True
+                return self.meet_scheduled
+
+        for slot in self.offered_slot_records:
+            label = (slot.get("label") or "").lower()
+            if label and label in low:
+                self.selected_slot_id = slot.get("id")
+                self.meet_scheduled = _format_meet_scheduled(slot)
+                self.booking_confirmed = True
+                return self.meet_scheduled
+            # Partial time match from label, e.g. "2:00 pm"
+            for token in re.findall(r"\d{1,2}:\d{2}\s*(?:am|pm)?", label):
+                if token.strip() in low:
+                    self.selected_slot_id = slot.get("id")
+                    self.meet_scheduled = _format_meet_scheduled(slot)
+                    self.booking_confirmed = True
+                    return self.meet_scheduled
+
+        if self.offered_slots and _text_matches_any(user_text, _EXIT_ACK_KEYWORDS):
+            # Generic yes on slot stage — associate first slot if only one offered.
+            if len(self.offered_slot_records) == 1:
+                slot = self.offered_slot_records[0]
+                self.selected_slot_id = slot.get("id")
+                self.meet_scheduled = _format_meet_scheduled(slot)
+                self.booking_confirmed = True
+                return self.meet_scheduled
+
+        return None
+
+    def maybe_confirm_booking(self, user_text: str) -> None:
+        if self.current_stage_key != "confirmation":
+            return
+        if self.meet_scheduled and _text_matches_any(user_text, _EXIT_ACK_KEYWORDS):
+            self.booking_confirmed = True
 
     def _max_sentences(self) -> int:
         ac = self.call_cfg.get("agent_config") or {}
@@ -428,7 +548,14 @@ class ConversationSession:
         remaining = max(0, stage.get("maxTurns", 2) - self.stage_turn_count)
         slot_hint = ""
         if self.current_stage_key == "slot_suggestion" and self.offered_slots:
-            slot_hint = f"\nOffer these slots: {', '.join(self.offered_slots)}"
+            details = []
+            for i, slot in enumerate(self.offered_slot_records or [], start=1):
+                lbl = slot.get("label") or self.offered_slots[i - 1]
+                details.append(f"{i}. {lbl}")
+            if details:
+                slot_hint = f"\nOffer these slots (exactly {len(details)}): " + "; ".join(details)
+            else:
+                slot_hint = f"\nOffer these slots: {', '.join(self.offered_slots)}"
 
         stage_block = f"""## Active stage: {stage.get('label')} ({stage.get('key')})
 Goal: {stage.get('goal')}
@@ -570,6 +697,8 @@ Focus ONLY on this stage goal for your next reply."""
             "dncRequested": self.dnc_requested,
             "calendarSourceId": booking.get("calendarSourceId"),
             "offeredSlots": self.offered_slots,
+            "selectedSlotId": self.selected_slot_id,
+            "meetScheduled": self.meet_scheduled,
             "objectionAttempts": self.objection_attempts,
             "bookingConfirmed": self.booking_confirmed,
         }
