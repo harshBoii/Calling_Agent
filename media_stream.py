@@ -1,6 +1,7 @@
 import audioop
 import asyncio
 import base64
+import contextlib
 import datetime as dt
 import json
 
@@ -19,6 +20,61 @@ from config import (
 from llm import ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook
+
+
+async def _shutdown_task(task: asyncio.Task, call_sid: str, label: str) -> None:
+    """Cancel a background task and wait for it to exit."""
+    if task.done():
+        if not task.cancelled():
+            exc = task.exception()
+            if exc:
+                print(
+                    f"[{call_sid}] {label} finished with error: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    print(f"[{call_sid}] {label} stopped", flush=True)
+
+
+async def _finalize_call(
+    call_sid: str,
+    *,
+    started_at: dt.datetime | None,
+    ended_at: dt.datetime,
+    connected: bool,
+    turns: list[dict],
+    call_cfg: dict,
+    redis_client,
+    cfg_token: str | None,
+) -> None:
+    """Update Redis status and deliver call.completed webhook."""
+    if redis_client and cfg_token:
+        try:
+            await redis_client.rpush(done_key(cfg_token), "1")
+            await set_call_status(redis_client, cfg_token, "completed")
+        except Exception as e:
+            print(
+                f"[{call_sid}] call:done signal error: {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+    duration_sec = int((ended_at - started_at).total_seconds()) if started_at else 0
+    call_record = {
+        "call_sid": call_sid,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "connected": connected,
+        "duration_sec": duration_sec,
+        "turns": turns,
+    }
+    try:
+        print(f"[{call_sid}] Sending call.completed webhook…", flush=True)
+        await send_call_completed_webhook(call_record, call_cfg)
+    except Exception as e:
+        print(f"[{call_sid}] Webhook dispatch error: {type(e).__name__}: {e}", flush=True)
 
 
 async def run_media_stream(
@@ -387,31 +443,24 @@ async def run_media_stream(
             print(f"[{call_sid}] Sarvam STT error: {type(e).__name__}: {e}", flush=True)
 
     # ── Pipeline ───────────────────────────────────────────────────────────────
-    stt_task = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
-    await asyncio.gather(receive_from_telnyx(), stt_task())
-    ended_at = dt.datetime.now(dt.timezone.utc)
-    print(f"[{call_sid}] Pipeline finished", flush=True)
+    stt_fn = stream_to_deepgram if stt_provider == "deepgram" else stream_to_sarvam
+    telnyx_task = asyncio.create_task(receive_from_telnyx())
+    stt_task_handle = asyncio.create_task(stt_fn())
 
-    if redis_client and cfg_token:
-        try:
-            await redis_client.rpush(done_key(cfg_token), "1")
-            await set_call_status(redis_client, cfg_token, "completed")
-        except Exception as e:
-            print(
-                f"[{call_sid}] call:done signal error: {type(e).__name__}: {e}",
-                flush=True,
-            )
-
-    duration_sec = int((ended_at - started_at).total_seconds()) if started_at else 0
-    call_record = {
-        "call_sid": call_sid,
-        "started_at": started_at,
-        "ended_at": ended_at,
-        "connected": connected,
-        "duration_sec": duration_sec,
-        "turns": turns,
-    }
     try:
-        await send_call_completed_webhook(call_record, call_cfg)
-    except Exception as e:
-        print(f"[{call_sid}] Webhook dispatch error: {type(e).__name__}: {e}", flush=True)
+        await telnyx_task
+    finally:
+        print(f"[{call_sid}] Telnyx stream ended — shutting down STT", flush=True)
+        await _shutdown_task(stt_task_handle, call_sid, "STT")
+        ended_at = dt.datetime.now(dt.timezone.utc)
+        print(f"[{call_sid}] Pipeline finished", flush=True)
+        await _finalize_call(
+            call_sid,
+            started_at=started_at,
+            ended_at=ended_at,
+            connected=connected,
+            turns=turns,
+            call_cfg=call_cfg,
+            redis_client=redis_client,
+            cfg_token=cfg_token,
+        )
