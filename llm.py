@@ -16,9 +16,10 @@ from config import (
     GEMINI_API_KEY,
     GROQ_API_KEY,
     OPENAI_API_KEY,
-    SARVAM_API_KEY,
     QUESTIONS_TO_ASK,
+    SARVAM_API_KEY,
 )
+from agent_config import get_discovery_stage_goal, get_greeting_stage_goal
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -65,6 +66,9 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
         p, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
     )
 
+    stage_goal = get_greeting_stage_goal(cfg.get("agent_config"))
+    goal_line = f"\n- Stage goal: {stage_goal}" if stage_goal else ""
+
     prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
 
 Generate a warm, natural opening line for a phone call. Respond with text written only in {cfg['language']}:
@@ -74,7 +78,7 @@ Generate a warm, natural opening line for a phone call. Respond with text writte
 - End with a soft permission question ("Is this a good time?")
 - Sound like a real human — not scripted or robotic
 - Be MAX 2-3 sentences total
-- Speak in {cfg['language']}
+- Speak in {cfg['language']}{goal_line}
 
 Lead context (use subtly to personalize tone, don't state it directly):
 {cfg['info_about_lead']}
@@ -168,6 +172,16 @@ async def generate_questions_to_ask(cfg: dict, provider: str | None = None) -> s
         p, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
     )
 
+    discovery_goal = get_discovery_stage_goal(cfg.get("agent_config"))
+    ac = cfg.get("agent_config") or {}
+    kg = ac.get("knowledgeGrounding") or {}
+    blacklist = kg.get("claimBlacklist") or []
+    blacklist_note = ""
+    if blacklist:
+        blacklist_note = f"\n- Do NOT ask about: {', '.join(blacklist)}"
+
+    goal_note = f"\n- Discovery goal: {discovery_goal}" if discovery_goal else ""
+
     prompt = f"""You are drafting discovery questions for a 2-minute outbound sales call.
 
 Context:
@@ -175,7 +189,7 @@ Context:
 - Company: {cfg.get('company')}
 - Product: {cfg.get('product')}
 - Offer: {cfg.get('perks_of_product')}
-- Lead context (use subtly): {cfg.get('info_about_lead')}
+- Lead context (use subtly): {cfg.get('info_about_lead')}{goal_note}{blacklist_note}
 
 Task:
 - Produce 2 to 4 short, natural questions the agent should ask early in the call.

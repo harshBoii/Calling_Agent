@@ -218,8 +218,10 @@ def _normalize_previous_chat_context(raw) -> str | None:
 
 
 def build_call_config(body: dict | None) -> dict:
+    from agent_config import build_base_system_prompt, parse_and_merge
+
     print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
-    b = body or {}
+    agent_config, b = parse_and_merge(body)
     # Accept both snake_case (backend) and camelCase (frontend UI) inputs.
     language = b.get("language") or b.get("languageMode") or LANGUAGE
     dg_language = b.get("deepgram_language") or b.get("deepgramLanguage") or "en"
@@ -230,10 +232,27 @@ def build_call_config(body: dict | None) -> dict:
     perks = b.get("perks_of_product", PERKS_OF_PRODUCT)
     lead_info = b.get("info_about_lead", INFO_ABOUT_LEAD)
     voice_id = b.get("voiceId") or ELEVENLABS_VOICE_ID
+    if agent_config:
+        identity = agent_config.get("identity") or {}
+        voice = identity.get("voice") or {}
+        voice_id = b.get("voiceId") or voice.get("ttsVoiceId") or ELEVENLABS_VOICE_ID
+        agent_name = (
+            b.get("agent_name")
+            or b.get("AGENT_NAME")
+            or identity.get("agentName")
+            or AGENT_NAME
+        )
+        agent_role = (
+            b.get("agent_role")
+            or b.get("AGENT_ROLE")
+            or identity.get("roleFraming")
+            or AGENT_ROLE
+        )
+    else:
+        agent_name = b.get("agent_name") or b.get("AGENT_NAME") or AGENT_NAME
+        agent_role = b.get("agent_role") or b.get("AGENT_ROLE") or AGENT_ROLE
     use_sarvam_tts = b.get("use_sarvam_tts", False)
     sarvam_speaker = b.get("sarvam_speaker", "rohan")
-    agent_name = b.get("agent_name") or b.get("AGENT_NAME") or AGENT_NAME
-    agent_role = b.get("agent_role") or b.get("AGENT_ROLE") or AGENT_ROLE
 
     q_raw = b.get("questions_to_ask") or b.get("QUESTIONS_TO_ASK") or b.get("questions")
     if isinstance(q_raw, list):
@@ -274,10 +293,30 @@ def build_call_config(body: dict | None) -> dict:
     previous_chat_context = _normalize_previous_chat_context(
         b.get("previousChatContext")
     )
-    system_prompt = b.get("system_prompt") or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
-    system_prompt = prepend_previous_chat_context(
-        system_prompt, previous_chat_context
-    )
+    custom_prompt = b.get("system_prompt")
+    if agent_config:
+        interim = {
+            "language": language,
+            "name": name,
+            "company": company,
+            "product": product,
+            "perks_of_product": perks,
+            "info_about_lead": lead_info,
+            "agent_name": agent_name,
+            "agent_role": agent_role,
+            "questions_to_ask": questions_to_ask,
+            "previous_chat_context": previous_chat_context,
+            "agent_config": agent_config,
+        }
+        system_prompt = build_base_system_prompt(interim, custom_prompt=custom_prompt)
+        system_prompt = prepend_previous_chat_context(
+            system_prompt, previous_chat_context
+        )
+    else:
+        system_prompt = custom_prompt or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+        system_prompt = prepend_previous_chat_context(
+            system_prompt, previous_chat_context
+        )
     opening_greeting = b.get("opening_greeting") or OPENING_GREETING_TEMPLATE.format(**ctx)
     res = {
         "language": language,
@@ -300,6 +339,8 @@ def build_call_config(body: dict | None) -> dict:
         "llm_model": model,
         "use_sarvam_tts": use_sarvam_tts,
         "sarvam_speaker": sarvam_speaker,
+        "agent_config": agent_config,
+        "dynamic_greeting": b.get("dynamic_greeting", True),
     }
     print(f"Config: {res}")
 

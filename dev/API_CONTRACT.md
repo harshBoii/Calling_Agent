@@ -131,6 +131,33 @@ Places an AI voice call via Telnyx. Conversation runs over WebSocket on this ser
 | `stt_provider` | no | string | `"auto"` \| `"deepgram"` \| `"sarvam"` |
 | `use_sarvam_tts` | no | boolean | |
 | `sarvam_speaker` | no | string | |
+| `agent_config` | no | object | Structured agent behavior (see below). Optional — legacy flat fields still work alone. |
+
+#### `agent_config` (optional)
+
+When present, drives conversation stages, guardrails, objections, compliance, and booking. **Top-level fields win on overlap:**
+
+| Top-level | Fallback inside `agent_config` |
+|-----------|-------------------------------|
+| `agent_name` | `identity.agentName` |
+| `agent_role` | `identity.roleFraming` (`{{companyName}}` → top-level `company`) |
+| `voiceId` | `identity.voice.ttsVoiceId` |
+| `company`, `name`, `product`, etc. | never overridden by `identity.companyName` |
+
+| Section | Runtime effect |
+|---------|----------------|
+| `identity` | Personality tone/formality in system prompt |
+| `conversationFlow.stages` | Stage machine: each LLM turn gets active stage goal; advances on `maxTurns`, exit heuristics, or `skipToTargets` |
+| `knowledgeGrounding` | Strict claim whitelist/blacklist; `unknownFactFallbackLine` when unsure |
+| `objectionHandling` | Objection library injected into prompt; max attempts → soft close + end call |
+| `behavioralGuardrails` | Hard `maxSentencesPerTurn` cap; escalation triggers (anger: one retry then exit; human request: immediate exit) |
+| `compliance` | AI disclosure prepended to greeting; `maxCallDurationSec` timer; opt-out phrase ends call + sets DNC flag |
+| `bookingClose` | At `slot_suggestion` stage, fetches slots via calendar stub using `calendarSourceId` |
+| `personalization.enabledPresetIds` | Suggestive hints only (not enforced) |
+
+If both `system_prompt` and `agent_config` are sent, custom prompt is used **and** agent_config rules are appended.
+
+Invalid `agent_config` returns **`400`** with Pydantic validation errors.
 
 #### Example request
 ```json
@@ -240,7 +267,14 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
       "provider": "telnyx",
       "language": "en",
       "voiceModel": "eleven_flash_v2_5",
-      "llmProvider": "claude"
+      "llmProvider": "claude",
+      "conversationStage": "close",
+      "escalationReason": null,
+      "dncRequested": false,
+      "calendarSourceId": "cal_primary_001",
+      "offeredSlots": ["Tuesday 10:00 AM UTC"],
+      "objectionAttempts": 0,
+      "bookingConfirmed": false
     }
   },
   "transcript": {

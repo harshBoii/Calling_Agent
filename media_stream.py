@@ -9,7 +9,9 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from sarvamai import AsyncSarvamAI
 
+from agent_config import ConversationSession
 from arq_jobs import done_key, set_call_status
+from calendar_provider import default_calendar_provider
 from config import (
     DEEPGRAM_API_KEY,
     MIN_WORDS_TO_RESPOND,
@@ -72,6 +74,8 @@ async def _finalize_call(
     }
     try:
         print(f"[{call_sid}] Sending call.completed webhook…", flush=True)
+        if call_cfg.get("_conversation_state"):
+            call_cfg.setdefault("conversation_metadata", call_cfg["_conversation_state"])
         await send_call_completed_webhook(call_record, call_cfg)
     except Exception as e:
         print(f"[{call_sid}] Webhook dispatch error: {type(e).__name__}: {e}", flush=True)
@@ -90,6 +94,13 @@ async def run_media_stream(
 
     system_prompt = call_cfg["system_prompt"]
     opening_greeting = call_cfg["opening_greeting"]
+    base_system_prompt = system_prompt
+    session: ConversationSession | None = None
+    if call_cfg.get("agent_config"):
+        session = ConversationSession(call_cfg)
+        if call_cfg.get("_ai_disclosure_done"):
+            session.ai_disclosure_done = True
+    duration_timer: asyncio.Task | None = None
     el_model = call_cfg["elevenlabs_model"]
     voice_id = call_cfg["voice_id"]
     dg_url = deepgram_ws_url(call_cfg["deepgram_language"])
@@ -123,6 +134,99 @@ async def run_media_stream(
         if started_at is None:
             return 0.0
         return round((dt.datetime.now(dt.timezone.utc) - started_at).total_seconds(), 2)
+
+    async def _handle_user_turn(user_text: str) -> None:
+        nonlocal agent_speaking
+
+        if session and session.call_should_end:
+            return
+
+        print(f"[{call_sid}] 🎤 Human: {user_text}", flush=True)
+        conversation_history.append({"role": "user", "content": user_text})
+        turns.append({"role": "user", "text": user_text, "ts": _ts()})
+
+        if session:
+            opt_out_line = session.check_compliance_on_user_input(user_text)
+            if opt_out_line:
+                conversation_history.append({"role": "assistant", "content": opt_out_line})
+                turns.append({"role": "agent", "text": opt_out_line, "ts": _ts()})
+                await send_audio(opt_out_line)
+                session.sync_to_cfg()
+                return
+
+            escalation_line = session.check_escalation(user_text)
+            if escalation_line:
+                conversation_history.append({"role": "assistant", "content": escalation_line})
+                turns.append({"role": "agent", "text": escalation_line, "ts": _ts()})
+                await send_audio(escalation_line)
+                session.sync_to_cfg()
+                return
+
+            objection_hint = session.handle_objection(user_text)
+            if session.objection_attempts >= session._max_objection_attempts():
+                soft_line = session._soft_close_line()
+                session.escalation_reason = "failed_objection_handles"
+                session.call_should_end = True
+                conversation_history.append({"role": "assistant", "content": soft_line})
+                turns.append({"role": "agent", "text": soft_line, "ts": _ts()})
+                await send_audio(soft_line)
+                session.sync_to_cfg()
+                return
+
+            session.advance_stage(user_text)
+
+            if (
+                session.current_stage_key == "slot_suggestion"
+                and not session.offered_slots
+            ):
+                booking = (call_cfg.get("agent_config") or {}).get("bookingClose") or {}
+                source_id = booking.get("calendarSourceId") or "default"
+                count = int(booking.get("slotsToOffer") or 2)
+                session.offered_slots = await default_calendar_provider.get_available_slots(
+                    source_id, count
+                )
+
+            turn_prompt = session.build_turn_prompt(base_system_prompt)
+            if objection_hint:
+                turn_prompt += (
+                    f"\n\n## Objection detected\nUse this guidance: {objection_hint}"
+                )
+            agent_reply = await ask_llm(
+                conversation_history, turn_prompt, llm_provider, llm_model
+            )
+            agent_reply = session.enforce_reply(agent_reply)
+            session.stage_turn_count += 1
+            session.sync_to_cfg()
+        else:
+            agent_reply = await ask_llm(
+                conversation_history, system_prompt, llm_provider, llm_model
+            )
+
+        conversation_history.append({"role": "assistant", "content": agent_reply})
+        turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
+        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
+        await send_audio(agent_reply)
+
+    async def _duration_watchdog() -> None:
+        if not session:
+            return
+        max_sec = session._max_call_duration_sec()
+        if not max_sec:
+            return
+        await asyncio.sleep(max_sec)
+        if session.call_should_end:
+            return
+        close_line = (
+            "I want to respect your time, so I'll wrap up here. "
+            "Thank you — we'll follow up with details. Goodbye."
+        )
+        session.call_should_end = True
+        session.escalation_reason = session.escalation_reason or "max_call_duration"
+        conversation_history.append({"role": "assistant", "content": close_line})
+        turns.append({"role": "agent", "text": close_line, "ts": _ts()})
+        await send_audio(close_line)
+        session.sync_to_cfg()
+        print(f"[{call_sid}] Max call duration reached ({max_sec}s)", flush=True)
 
     # ── TTS sender ─────────────────────────────────────────────────────────────
     async def send_audio(text: str) -> None:
@@ -181,7 +285,7 @@ async def run_media_stream(
 
     # ── Telnyx receiver ────────────────────────────────────────────────────────
     async def receive_from_telnyx() -> None:
-        nonlocal stream_id, started_at, connected, agent_speaking
+        nonlocal stream_id, started_at, connected, agent_speaking, duration_timer
 
         last_barge_in_at: dt.datetime | None = None
         # ── Tunables ──────────────────────────────────────────────────────────
@@ -213,6 +317,10 @@ async def run_media_stream(
                     connected = True
                     conversation_history.append({"role": "assistant", "content": opening_greeting})
                     turns.append({"role": "agent", "text": opening_greeting, "ts": 0.0})
+                    if session and call_cfg.get("_ai_disclosure_done"):
+                        session.ai_disclosure_done = True
+                    if session and session._max_call_duration_sec():
+                        duration_timer = asyncio.create_task(_duration_watchdog())
                     asyncio.create_task(send_audio(opening_greeting))
 
                 elif event == "media":
@@ -323,16 +431,9 @@ async def run_media_stream(
                                 if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
                                     continue
-                                print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
-                                conversation_history.append({"role": "user", "content": full_turn})
-                                turns.append({"role": "user", "text": full_turn, "ts": _ts()})
-                                agent_reply = await ask_llm(
-                                    conversation_history, system_prompt, llm_provider, llm_model
-                                )
-                                conversation_history.append({"role": "assistant", "content": agent_reply})
-                                turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
-                                print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-                                await send_audio(agent_reply)
+                                if session and session.call_should_end:
+                                    continue
+                                await _handle_user_turn(full_turn)
 
                         except Exception as e:
                             print(f"[{call_sid}] Transcript error: {e}", flush=True)
@@ -423,16 +524,9 @@ async def run_media_stream(
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{transcript}'", flush=True)
                                     continue
 
-                                print(f"[{call_sid}] 🎤 Human: {transcript}", flush=True)
-                                conversation_history.append({"role": "user", "content": transcript})
-                                turns.append({"role": "user", "text": transcript, "ts": _ts()})
-                                agent_reply = await ask_llm(
-                                    conversation_history, system_prompt, llm_provider, llm_model
-                                )
-                                conversation_history.append({"role": "assistant", "content": agent_reply})
-                                turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
-                                print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-                                await send_audio(agent_reply)
+                                if session and session.call_should_end:
+                                    continue
+                                await _handle_user_turn(transcript)
 
                         except Exception as e:
                             print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
@@ -450,6 +544,12 @@ async def run_media_stream(
     try:
         await telnyx_task
     finally:
+        if duration_timer and not duration_timer.done():
+            duration_timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await duration_timer
+        if session:
+            session.sync_to_cfg()
         print(f"[{call_sid}] Telnyx stream ended — shutting down STT", flush=True)
         await _shutdown_task(stt_task_handle, call_sid, "STT")
         ended_at = dt.datetime.now(dt.timezone.utc)

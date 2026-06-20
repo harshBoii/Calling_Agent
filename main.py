@@ -9,6 +9,9 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 
+from pydantic import ValidationError
+
+from agent_config import get_compliance_disclosure
 from arq_jobs import cfg_key, dial_telnyx_call, set_call_status, start_key, status_key
 from config import (
     CAMPAIGN_QUEUE,
@@ -35,6 +38,7 @@ from message_jobs import (
     msg_status_key,
     set_message_status,
 )
+from schemas.outbound_call import OutboundCallRequest
 from webhook import send_email_completed_webhook, send_sms_completed_webhook
 
 arq_pool = None
@@ -349,35 +353,34 @@ async def make_outbound_call(request: Request):
     _ensure_service_ready()
 
     body = await request.json()
-    raw_to = body.get("to")
-    if not raw_to:
-        raise HTTPException(status_code=400, detail="Missing 'to' number")
+    try:
+        req = OutboundCallRequest.model_validate(body)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=e.errors()) from e
 
-    to_number = _normalize_to_e164(str(raw_to))
+    to_number = _normalize_to_e164(str(req.to))
     if not _E164_RE.match(to_number):
         raise HTTPException(
             status_code=400,
-            detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {raw_to!r})",
+            detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {req.to!r})",
         )
 
-    call_type = body.get("call_type", "campaign")
-    if call_type not in ("on_demand", "campaign"):
-        raise HTTPException(
-            status_code=400,
-            detail="call_type must be 'on_demand' or 'campaign'",
-        )
-
-    cfg_body = {k: v for k, v in body.items() if k != "to"}
+    call_type = req.call_type
+    cfg_body = req.to_cfg_body()
     cfg = build_call_config(cfg_body)
 
-    use_dynamic = cfg_body.get("dynamic_greeting", True)
-    if use_dynamic and not cfg_body.get("opening_greeting"):
+    use_dynamic = req.dynamic_greeting
+    if use_dynamic and not req.opening_greeting:
         cfg["opening_greeting"] = await generate_opening_greeting(cfg, cfg["llm_provider"])
+        disclosure = get_compliance_disclosure(cfg.get("agent_config"))
+        if disclosure:
+            cfg["opening_greeting"] = f"{disclosure} {cfg['opening_greeting']}"
+            cfg["_ai_disclosure_done"] = True
 
     q_raw = (
-        cfg_body.get("questions_to_ask")
-        or cfg_body.get("QUESTIONS_TO_ASK")
-        or cfg_body.get("questions")
+        req.questions_to_ask
+        or req.QUESTIONS_TO_ASK
+        or req.questions
     )
     if (
         (
@@ -385,7 +388,8 @@ async def make_outbound_call(request: Request):
             or (isinstance(q_raw, str) and not q_raw.strip())
             or (isinstance(q_raw, list) and not q_raw)
         )
-        and not cfg_body.get("system_prompt")
+        and not req.system_prompt
+        and not cfg.get("agent_config")
     ):
         cfg["questions_to_ask"] = await generate_questions_to_ask(cfg, cfg["llm_provider"])
         ctx = {
@@ -405,11 +409,29 @@ async def make_outbound_call(request: Request):
             cfg["system_prompt"],
             cfg.get("previous_chat_context"),
         )
+    elif (
+        (
+            not q_raw
+            or (isinstance(q_raw, str) and not q_raw.strip())
+            or (isinstance(q_raw, list) and not q_raw)
+        )
+        and cfg.get("agent_config")
+    ):
+        cfg["questions_to_ask"] = await generate_questions_to_ask(cfg, cfg["llm_provider"])
+        from agent_config import build_base_system_prompt
+
+        cfg["system_prompt"] = build_base_system_prompt(
+            cfg, custom_prompt=req.system_prompt
+        )
+        cfg["system_prompt"] = prepend_previous_chat_context(
+            cfg["system_prompt"],
+            cfg.get("previous_chat_context"),
+        )
 
     cfg["_ids"] = {
-        "companyId": body.get("companyId"),
-        "leadId": body.get("leadId"),
-        "campaignId": body.get("campaignId"),
+        "companyId": req.companyId,
+        "leadId": req.leadId,
+        "campaignId": req.campaignId,
     }
     cfg["_phone"] = to_number
     cfg["call_type"] = call_type

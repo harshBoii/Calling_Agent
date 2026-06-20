@@ -269,6 +269,7 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
                 "language": cfg.get("deepgram_language"),
                 "voiceModel": voice_model,
                 "llmProvider": cfg.get("llm_provider"),
+                **(cfg.get("_conversation_state") or cfg.get("conversation_metadata") or {}),
             },
         },
         "transcript": {
