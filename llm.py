@@ -251,6 +251,10 @@ async def ask_llm(
     Unified LLM caller. Routes to the right provider.
     provider: "groq" | "openai" | "claude" | "gemini" | "sarvam"
     """
+    provider = (provider or DEFAULT_LLM_PROVIDER).strip().lower()
+    model = model or DEFAULT_LLM_MODELS.get(
+        provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
+    )
     try:
         if provider == "groq":
             if not groq_client:
@@ -343,6 +347,9 @@ async def ask_llm_for_analysis(
     strict JSON. Raises on API failures (unlike ask_llm, which never raises).
     """
     p = (provider or "").strip().lower()
+    model = model or DEFAULT_LLM_MODELS.get(
+        p, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
+    )
 
     if p == "groq":
         if not groq_client:

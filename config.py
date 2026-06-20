@@ -218,7 +218,12 @@ def _normalize_previous_chat_context(raw) -> str | None:
 
 
 def build_call_config(body: dict | None) -> dict:
-    from agent_config import build_base_system_prompt, normalize_meet_slots, parse_and_merge
+    from agent_config import (
+        _resolve_role_framing,
+        build_base_system_prompt,
+        normalize_meet_slots,
+        parse_and_merge,
+    )
 
     print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
     agent_config, b = parse_and_merge(body)
@@ -251,6 +256,7 @@ def build_call_config(body: dict | None) -> dict:
     else:
         agent_name = b.get("agent_name") or b.get("AGENT_NAME") or AGENT_NAME
         agent_role = b.get("agent_role") or b.get("AGENT_ROLE") or AGENT_ROLE
+    agent_role = _resolve_role_framing(agent_role, company)
     use_sarvam_tts = b.get("use_sarvam_tts", False)
     sarvam_speaker = b.get("sarvam_speaker", "rohan")
 
@@ -264,10 +270,9 @@ def build_call_config(body: dict | None) -> dict:
     else:
         questions_to_ask = QUESTIONS_TO_ASK.strip()
 
-    provider = b.get("llm_provider", DEFAULT_LLM_PROVIDER).lower()
-    model = b.get(
-        "llm_model",
-        DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]),
+    provider = (b.get("llm_provider") or DEFAULT_LLM_PROVIDER).lower()
+    model = b.get("llm_model") or DEFAULT_LLM_MODELS.get(
+        provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
     )
 
     # ── STT provider: "auto" resolves based on language ──────────────────────
