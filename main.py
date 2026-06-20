@@ -9,7 +9,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 
-from arq_jobs import cfg_key, set_call_status, start_key, status_key
+from arq_jobs import cfg_key, dial_telnyx_call, set_call_status, start_key, status_key
 from config import (
     CAMPAIGN_QUEUE,
     CFG_TTL_SEC,
@@ -22,12 +22,20 @@ from config import (
     REDIS_URL,
     SYSTEM_PROMPT_TEMPLATE,
     TELNYX_PHONE_NUMBER,
+    USE_ARQ_QUEUE,
     build_call_config,
     prepend_previous_chat_context,
 )
 from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
-from message_jobs import msg_cfg_key, msg_start_key, msg_status_key, set_message_status
+from message_jobs import (
+    execute_message_send,
+    msg_cfg_key,
+    msg_start_key,
+    msg_status_key,
+    set_message_status,
+)
+from webhook import send_email_completed_webhook, send_sms_completed_webhook
 
 arq_pool = None
 redis_client: aioredis.Redis | None = None
@@ -39,9 +47,13 @@ _E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 async def lifespan(app: FastAPI):
     global arq_pool, redis_client
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-    arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+    if USE_ARQ_QUEUE:
+        arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
+    else:
+        arq_pool = None
     yield
-    await arq_pool.close()
+    if arq_pool is not None:
+        await arq_pool.close()
     await redis_client.aclose()
     arq_pool = None
     redis_client = None
@@ -78,9 +90,76 @@ def _parse_message_type(body: dict) -> str:
     return message_type
 
 
-async def _enqueue_message(payload: dict, message_type: str) -> dict:
-    if arq_pool is None or redis_client is None:
+def _ensure_service_ready() -> None:
+    if redis_client is None:
         raise HTTPException(status_code=503, detail="Service not ready")
+    if USE_ARQ_QUEUE and arq_pool is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+
+async def _direct_message(payload: dict, message_type: str) -> dict:
+    _ensure_service_ready()
+
+    task_token = str(uuid.uuid4())
+    payload["message_type"] = message_type
+    payload["_enqueue_time"] = time.time()
+    payload["_ids"] = {
+        "companyId": payload.pop("companyId", None),
+        "leadId": payload.pop("leadId", None),
+        "campaignId": payload.pop("campaignId", None),
+    }
+
+    await redis_client.set(msg_cfg_key(task_token), json.dumps(payload), ex=MSG_CFG_TTL_SEC)
+    await set_message_status(redis_client, task_token, "sending")
+
+    channel = payload.get("channel", "sms")
+    external_id: str | None = None
+    webhook_status = "FAILED"
+    error: str | None = None
+
+    try:
+        external_id, webhook_status, error = await execute_message_send(payload)
+    except Exception as e:
+        webhook_status = "FAILED"
+        error = str(e)
+
+    if webhook_status == "SENT":
+        await set_message_status(redis_client, task_token, "sent")
+    else:
+        await set_message_status(redis_client, task_token, "failed")
+
+    try:
+        if channel == "sms":
+            await send_sms_completed_webhook(
+                task_token=task_token,
+                cfg=payload,
+                external_id=external_id,
+                status=webhook_status,
+                error=error,
+            )
+        elif channel == "email":
+            await send_email_completed_webhook(
+                task_token=task_token,
+                cfg=payload,
+                external_id=external_id,
+                status=webhook_status,
+                error=error,
+            )
+    except Exception as e:
+        print(f"[MSG {task_token}] webhook error: {type(e).__name__}: {e}", flush=True)
+
+    if webhook_status != "SENT":
+        raise HTTPException(status_code=502, detail=error or "send failed")
+
+    return {
+        "status": "sent",
+        "id": external_id,
+        "task_token": task_token,
+    }
+
+
+async def _enqueue_message(payload: dict, message_type: str) -> dict:
+    _ensure_service_ready()
 
     task_token = str(uuid.uuid4())
     payload["message_type"] = message_type
@@ -135,7 +214,7 @@ async def _enqueue_message(payload: dict, message_type: str) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "use_arq_queue": USE_ARQ_QUEUE}
 
 
 @app.get("/call/status/{cfg_token}")
@@ -199,7 +278,9 @@ async def sms_send(request: Request):
         "leadId": body.get("leadId"),
         "campaignId": body.get("campaignId"),
     }
-    return await _enqueue_message(payload, message_type)
+    if USE_ARQ_QUEUE:
+        return await _enqueue_message(payload, message_type)
+    return await _direct_message(payload, message_type)
 
 
 @app.post("/email/send")
@@ -240,13 +321,32 @@ async def email_send(request: Request):
         "leadId": body.get("leadId"),
         "campaignId": body.get("campaignId"),
     }
-    return await _enqueue_message(payload, message_type)
+    if USE_ARQ_QUEUE:
+        return await _enqueue_message(payload, message_type)
+    return await _direct_message(payload, message_type)
+
+
+async def _direct_outbound_call(cfg: dict, cfg_token: str, to_number: str) -> dict:
+    await redis_client.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
+    await set_call_status(redis_client, cfg_token, "dialling")
+    try:
+        call_control_id = await dial_telnyx_call(cfg_token, to_number)
+    except Exception as e:
+        await set_call_status(redis_client, cfg_token, "dial_failed")
+        raise HTTPException(status_code=502, detail=f"Dial failed: {e}")
+
+    await set_call_status(redis_client, cfg_token, "connected")
+    return {
+        "status": "initiated",
+        "call_control_id": call_control_id,
+        "opening_greeting": cfg.get("opening_greeting", ""),
+        "cfg_token": cfg_token,
+    }
 
 
 @app.post("/call/outbound")
 async def make_outbound_call(request: Request):
-    if arq_pool is None or redis_client is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
+    _ensure_service_ready()
 
     body = await request.json()
     raw_to = body.get("to")
@@ -316,6 +416,10 @@ async def make_outbound_call(request: Request):
     cfg["_enqueue_time"] = time.time()
 
     cfg_token = str(uuid.uuid4())
+
+    if not USE_ARQ_QUEUE:
+        return await _direct_outbound_call(cfg, cfg_token, to_number)
+
     await redis_client.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
     await set_call_status(redis_client, cfg_token, "queued")
 

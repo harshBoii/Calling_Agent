@@ -23,6 +23,32 @@ Voice calls and messaging use **separate queues** (8 call slots + 8 message slot
 
 ---
 
+## Execution mode (`USE_ARQ_QUEUE`)
+
+Global env var (default **`true`**). Checked at API startup; exposed on `GET /health` as `use_arq_queue`.
+
+| `USE_ARQ_QUEUE` | Workers required | Calls | SMS / Email |
+|-----------------|------------------|-------|-------------|
+| `true` (default) | Yes (4 background workers) | Enqueue; campaign returns `queued`; on-demand waits up to 15s | Same |
+| `false` | No | API dials Telnyx immediately | API sends via Telnyx/Resend immediately |
+
+**Direct mode** (`USE_ARQ_QUEUE=false`) — for local dev without Arq workers:
+
+- **Calls:** always `200` with `{ "status": "initiated", "call_control_id", "opening_greeting", "cfg_token" }` — no `queued`, no `503`, no `job_id`
+- **SMS / Email:** always `200` with `{ "status": "sent", "id", "task_token" }` — no `queued`, no `503`, no `job_id`
+- Completion webhooks still fire after call end / send
+- No Arq concurrency caps
+- Redis still required (WebSocket cfg, status polling)
+
+Local `.env` example:
+```bash
+USE_ARQ_QUEUE=false
+```
+
+Production / Render: `USE_ARQ_QUEUE=true` (default).
+
+---
+
 ## Webhook delivery (all channels)
 
 Configured via environment:
@@ -62,8 +88,10 @@ Up to **3 retries** with exponential backoff on failure. Your endpoint should re
 
 **Response `200`**
 ```json
-{ "ok": true }
+{ "ok": true, "use_arq_queue": true }
 ```
+
+`use_arq_queue` reflects the current `USE_ARQ_QUEUE` env setting.
 
 ---
 
@@ -135,6 +163,8 @@ Places an AI voice call via Telnyx. Conversation runs over WebSocket on this ser
 
 Poll `GET /call/status/{cfg_token}` or wait for `call.completed` webhook.
 
+> **Direct mode** (`USE_ARQ_QUEUE=false`): campaign and on-demand both return immediately with `status: "initiated"` (no `queued`, no `job_id`, no 503).
+
 #### Instant response — on-demand (`call_type: "on_demand"`)
 
 Waits up to **15s** for Telnyx dial to succeed.
@@ -160,7 +190,8 @@ Waits up to **15s** for Telnyx dial to succeed.
 | Status | `detail` |
 |--------|----------|
 | `400` | Missing `to`, invalid E.164, invalid `call_type` |
-| `503` | Service not ready (Redis/Arq unavailable) |
+| `502` | Telnyx dial failed (direct mode only) |
+| `503` | Service not ready (Redis/Arq unavailable when `USE_ARQ_QUEUE=true`) |
 
 #### Call status polling
 
@@ -241,7 +272,7 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
 
 ### `POST /sms/send`
 
-Queues SMS via Telnyx. Sent by messaging Arq workers.
+Queues SMS via Telnyx when `USE_ARQ_QUEUE=true`; sends inline when `false`.
 
 #### Request body
 
@@ -279,6 +310,8 @@ Queues SMS via Telnyx. Sent by messaging Arq workers.
 }
 ```
 
+> **Direct mode:** always returns `{ "status": "sent", "id", "task_token" }` immediately (no `queued`, no `job_id`).
+
 #### Instant response — on-demand
 
 **`200 OK`**
@@ -301,7 +334,8 @@ Queues SMS via Telnyx. Sent by messaging Arq workers.
 | Status | `detail` |
 |--------|----------|
 | `400` | Missing `to`/`message`, invalid E.164, empty message, invalid `message_type` |
-| `503` | Service not ready |
+| `502` | Provider send failed (direct mode) |
+| `503` | Service not ready (when `USE_ARQ_QUEUE=true`) |
 
 #### Message status polling
 
@@ -354,7 +388,7 @@ Posted to `WEBHOOK_SMS` after send attempt (from messaging worker).
 
 ### `POST /email/send`
 
-Queues email via Resend. Sent by messaging Arq workers.
+Queues email via Resend when `USE_ARQ_QUEUE=true`; sends inline when `false`.
 
 #### Request body
 
@@ -389,7 +423,7 @@ Queues email via Resend. Sent by messaging Arq workers.
 
 #### Instant response
 
-Same shape as SMS:
+Same shape as SMS (queued mode). In **direct mode** (`USE_ARQ_QUEUE=false`), both campaign and on-demand return `{ "status": "sent", "id", "task_token" }` immediately.
 
 **Campaign `200`**
 ```json

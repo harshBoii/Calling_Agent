@@ -8,7 +8,7 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from sarvamai import AsyncSarvamAI
 
-from arq_jobs import done_key
+from arq_jobs import done_key, set_call_status
 from config import (
     DEEPGRAM_API_KEY,
     MIN_WORDS_TO_RESPOND,
@@ -395,6 +395,7 @@ async def run_media_stream(
     if redis_client and cfg_token:
         try:
             await redis_client.rpush(done_key(cfg_token), "1")
+            await set_call_status(redis_client, cfg_token, "completed")
         except Exception as e:
             print(
                 f"[{call_sid}] call:done signal error: {type(e).__name__}: {e}",

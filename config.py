@@ -5,6 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
 # ─── Twilio ───────────────────────────────────────────────────────────────────
 # TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
 # TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
@@ -31,6 +39,7 @@ MSG_CFG_TTL_SEC = 3600
 STATUS_TTL_SEC = 86400
 ON_DEMAND_DEADLINE_SEC = 15
 CALL_DONE_TIMEOUT_SEC = 14400
+USE_ARQ_QUEUE = _env_bool("USE_ARQ_QUEUE", default=True)
 
 # ─── Email (Resend) ───────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()

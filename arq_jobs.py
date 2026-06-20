@@ -48,6 +48,30 @@ def _decode_redis_value(raw) -> str | None:
     return str(raw)
 
 
+async def dial_telnyx_call(cfg_token: str, to_number: str) -> str:
+    """Dial Telnyx outbound call. Returns call_control_id."""
+    ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.telnyx.com/v2/calls",
+            headers={
+                "Authorization": f"Bearer {TELNYX_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "connection_id": TELNYX_CONNECTION_ID,
+                "to": to_number,
+                "from": TELNYX_PHONE_NUMBER,
+                "stream_url": f"{ws_base}/media-stream/{cfg_token}",
+                "stream_track": "inbound_track",
+                "stream_codec": "PCMU",
+            },
+        )
+        print(f"[CALL {cfg_token}] [TELNYX] {resp.status_code}: {resp.text}", flush=True)
+        resp.raise_for_status()
+        return resp.json()["data"]["call_control_id"]
+
+
 async def run_call_job(ctx, cfg_token: str) -> None:
     redis = ctx["redis"]
     try:
@@ -74,27 +98,8 @@ async def run_call_job(ctx, cfg_token: str) -> None:
             await redis.rpush(start_key(cfg_token), json.dumps({"error": "expired"}))
             return
 
-        ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.telnyx.com/v2/calls",
-                    headers={
-                        "Authorization": f"Bearer {TELNYX_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "connection_id": TELNYX_CONNECTION_ID,
-                        "to": to_number,
-                        "from": TELNYX_PHONE_NUMBER,
-                        "stream_url": f"{ws_base}/media-stream/{cfg_token}",
-                        "stream_track": "inbound_track",
-                        "stream_codec": "PCMU",
-                    },
-                )
-                print(f"[JOB {cfg_token}] [TELNYX] {resp.status_code}: {resp.text}", flush=True)
-                resp.raise_for_status()
-                data = resp.json()["data"]
+            call_control_id = await dial_telnyx_call(cfg_token, to_number)
         except Exception as e:
             await set_call_status(redis, cfg_token, "dial_failed")
             if call_type == "on_demand":
@@ -104,7 +109,6 @@ async def run_call_job(ctx, cfg_token: str) -> None:
                 )
             raise
 
-        call_control_id = data["call_control_id"]
         await set_call_status(redis, cfg_token, "connected")
 
         if call_type == "on_demand":

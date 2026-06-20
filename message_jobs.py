@@ -42,6 +42,45 @@ def _decode_redis_value(raw) -> str | None:
     return str(raw)
 
 
+async def execute_message_send(cfg: dict) -> tuple[str | None, str, str | None]:
+    """
+    Send SMS or email per cfg. Returns (external_id, webhook_status, error).
+    webhook_status is SENT | FAILED | EXPIRED.
+    """
+    channel = cfg.get("channel", "sms")
+    message_type = cfg.get("message_type", "campaign")
+    error: str | None = None
+
+    enqueue_time = float(cfg.get("_enqueue_time") or 0)
+    if message_type == "on_demand" and time.time() - enqueue_time > ON_DEMAND_DEADLINE_SEC:
+        return None, "EXPIRED", "expired"
+
+    external_id: str | None = None
+    if channel == "sms":
+        external_id = await send_telnyx_sms(
+            str(cfg.get("to")),
+            str(cfg.get("message") or cfg.get("body")),
+            from_number=str(cfg.get("from") or TELNYX_PHONE_NUMBER),
+        )
+    elif channel == "email":
+        from_addr = cfg.get("from") or DEFAULT_FROM_EMAIL
+        if not from_addr:
+            return None, "FAILED", "missing from address"
+        external_id = await send_resend_email(
+            to=str(cfg.get("to")),
+            from_addr=str(from_addr),
+            subject=str(cfg.get("subject") or ""),
+            html=str(cfg.get("body") or cfg.get("html") or ""),
+            text=cfg.get("text"),
+        )
+    else:
+        return None, "FAILED", f"unknown channel: {channel}"
+
+    if external_id:
+        return external_id, "SENT", None
+    return None, "FAILED", error or "provider send failed"
+
+
 async def run_message_job(ctx, task_token: str) -> None:
     redis = ctx["redis"]
     cfg: dict = {}
@@ -66,44 +105,15 @@ async def run_message_job(ctx, task_token: str) -> None:
         channel = cfg.get("channel", "sms")
         message_type = cfg.get("message_type", "campaign")
 
-        enqueue_time = float(cfg.get("_enqueue_time") or 0)
-        if message_type == "on_demand" and time.time() - enqueue_time > ON_DEMAND_DEADLINE_SEC:
-            webhook_status = "EXPIRED"
-            error = "expired"
+        external_id, webhook_status, error = await execute_message_send(cfg)
+
+        if webhook_status == "EXPIRED":
             await set_message_status(redis, task_token, "expired")
-            await redis.rpush(msg_start_key(task_token), json.dumps({"error": "expired"}))
+            if message_type == "on_demand":
+                await redis.rpush(msg_start_key(task_token), json.dumps({"error": "expired"}))
             return
 
-        if channel == "sms":
-            to_number = cfg.get("to")
-            body = cfg.get("message") or cfg.get("body")
-            from_number = cfg.get("from") or TELNYX_PHONE_NUMBER
-            external_id = await send_telnyx_sms(
-                str(to_number),
-                str(body),
-                from_number=str(from_number),
-            )
-        elif channel == "email":
-            to_email = cfg.get("to")
-            from_addr = cfg.get("from") or DEFAULT_FROM_EMAIL
-            if not from_addr:
-                error = "missing from address"
-                await set_message_status(redis, task_token, "failed")
-                return
-            external_id = await send_resend_email(
-                to=str(to_email),
-                from_addr=str(from_addr),
-                subject=str(cfg.get("subject") or ""),
-                html=str(cfg.get("body") or cfg.get("html") or ""),
-                text=cfg.get("text"),
-            )
-        else:
-            error = f"unknown channel: {channel}"
-            await set_message_status(redis, task_token, "failed")
-            return
-
-        if external_id:
-            webhook_status = "SENT"
+        if webhook_status == "SENT":
             await set_message_status(redis, task_token, "sent")
             if message_type == "on_demand":
                 await redis.rpush(
@@ -111,8 +121,6 @@ async def run_message_job(ctx, task_token: str) -> None:
                     json.dumps({"id": external_id, "status": "sent"}),
                 )
         else:
-            webhook_status = "FAILED"
-            error = error or "provider send failed"
             await set_message_status(redis, task_token, "failed")
             if message_type == "on_demand":
                 await redis.rpush(
