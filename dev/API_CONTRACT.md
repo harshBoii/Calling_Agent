@@ -171,6 +171,20 @@ When present, drives conversation stages, guardrails, objections, compliance, an
 | `bookingClose` | At `slot_suggestion` stage, offers slots from `available_meet_slots` when provided; otherwise calendar stub via `calendarSourceId` |
 | `personalization.enabledPresetIds` | Suggestive hints only (not enforced) |
 
+**Agent-initiated hangup:** The LLM may append `<<HANGUP>>` to a closing line when the conversation is clearly done (booking confirmed, mutual goodbye, or no interest after objection handling). The service also hangs up automatically on opt-out, escalation, max objections, max call duration, or when the agent reaches the `close` stage with a goodbye. `call.metadata.endCallReason` records why:
+
+| `endCallReason` | When |
+|-----------------|------|
+| `agent_confident_end` | LLM appended `<<HANGUP>>` |
+| `conversation_complete` | `close` stage + goodbye phrasing |
+| `booking_confirmed` | Slot booked + goodbye |
+| `no_interest` | Max objections, repeated not-interested, or soft close |
+| `opt_out` | Lead requested do-not-call |
+| `explicit_human_request` | Lead asked for a human |
+| `anger_detected` | Anger escalation after one retry |
+| `failed_objection_handles` | Objection library exhausted |
+| `max_call_duration` | `maxCallDurationSec` timer fired |
+
 If both `system_prompt` and `agent_config` are sent, custom prompt is used **and** agent_config rules are appended.
 
 Invalid `agent_config` returns **`400`** with Pydantic validation errors.
@@ -294,7 +308,8 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
       "selectedSlotId": "2026-06-24T14:00:00.000Z",
       "meetScheduled": "Tue Jun 24 2:00 PM",
       "objectionAttempts": 0,
-      "bookingConfirmed": true
+      "bookingConfirmed": true,
+      "endCallReason": "conversation_complete"
     }
   },
   "transcript": {

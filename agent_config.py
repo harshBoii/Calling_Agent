@@ -110,12 +110,28 @@ _SLOT_ORDINALS = [
     ("doosra", 1),
 ]
 
+HANGUP_MARKER = "<<HANGUP>>"
+
+CALL_END_INSTRUCTIONS = """## Ending the call
+When you are confident the conversation should end — meeting confirmed, clear mutual goodbye, or the lead has no interest after you have already tried handling objections — give a brief polite closing line and append <<HANGUP>> at the very end of your message (after your spoken words).
+Only use <<HANGUP>> when you are ready to end the call. Do not use it mid-conversation."""
+
+_GOODBYE_PHRASES = [
+    "goodbye",
+    "good bye",
+    "bye",
+    "take care",
+    "have a great day",
+    "thank you for your time",
+    "talk soon",
+    "speak soon",
+]
+
 
 def _format_meet_scheduled(slot: dict) -> str:
     """Human-readable meeting time for webhook, e.g. Tuesday June 24 at 2:00 PM."""
     label = (slot.get("label") or "").strip()
     if label:
-        # Drop trailing timezone token for cleaner webhook value when present.
         cleaned = re.sub(r"\s+(UTC|IST|GMT.*)$", "", label, flags=re.IGNORECASE)
         cleaned = cleaned.replace(",", "")
         return cleaned.strip()
@@ -140,6 +156,45 @@ def normalize_meet_slots(raw: list | None) -> list[dict]:
         elif hasattr(item, "model_dump"):
             out.append(item.model_dump())
     return out
+
+
+def parse_agent_reply(reply: str) -> tuple[str, bool]:
+    """Strip hangup marker from spoken text. Returns (spoken, should_hangup)."""
+    if HANGUP_MARKER in reply:
+        spoken = reply.replace(HANGUP_MARKER, "").strip()
+        return spoken, True
+    return reply.strip(), False
+
+
+def append_call_end_instructions(prompt: str) -> str:
+    if CALL_END_INSTRUCTIONS.strip() in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{CALL_END_INSTRUCTIONS}"
+
+
+def evaluate_hangup_confidence(session: "ConversationSession", spoken: str, marker_hangup: bool) -> tuple[bool, str | None]:
+    """Decide if the agent should hang up after this reply."""
+    if marker_hangup:
+        return True, "agent_confident_end"
+
+    low = spoken.lower()
+    if session.current_stage_key == "close":
+        if marker_hangup or any(p in low for p in _GOODBYE_PHRASES):
+            return True, "conversation_complete"
+
+    if session.booking_confirmed and session.current_stage_key in ("confirmation", "close"):
+        if any(p in low for p in _GOODBYE_PHRASES):
+            return True, "booking_confirmed"
+
+    if session.objection_attempts >= session._max_objection_attempts():
+        return True, "no_interest"
+
+    if session.no_interest_streak >= 2 and any(
+        p in low for p in _GOODBYE_PHRASES + ["understand", "no problem", "thanks"]
+    ):
+        return True, "no_interest"
+
+    return False, None
 
 
 def _resolve_role_framing(role: str | None, company: str) -> str:
@@ -344,6 +399,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
                 f"After {thresh} failed objection handles, use soft close and end call."
             )
     parts.append(_section("Behavioral guardrails (strict)", guard_lines))
+    parts.append(CALL_END_INSTRUCTIONS)
 
     if booking.get("closeTrigger"):
         parts.append(
@@ -434,6 +490,8 @@ class ConversationSession:
         self.selected_slot_id: str | None = None
         self.meet_scheduled: str | None = None
         self.booking_confirmed = False
+        self.end_call_reason: str | None = None
+        self.no_interest_streak = 0
 
     @property
     def current_stage_key(self) -> str:
@@ -659,6 +717,10 @@ Focus ONLY on this stage goal for your next reply."""
         if not key:
             return None
         self.objection_attempts += 1
+        if key == "not_interested":
+            self.no_interest_streak += 1
+        else:
+            self.no_interest_streak = 0
         library = (
             (self.call_cfg.get("agent_config") or {}).get("objectionHandling") or {}
         ).get("objectionLibrary") or {}
@@ -701,6 +763,7 @@ Focus ONLY on this stage goal for your next reply."""
             "meetScheduled": self.meet_scheduled,
             "objectionAttempts": self.objection_attempts,
             "bookingConfirmed": self.booking_confirmed,
+            "endCallReason": self.end_call_reason,
         }
 
 

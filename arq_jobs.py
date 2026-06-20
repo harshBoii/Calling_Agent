@@ -72,6 +72,28 @@ async def dial_telnyx_call(cfg_token: str, to_number: str) -> str:
         return resp.json()["data"]["call_control_id"]
 
 
+async def hangup_telnyx_call(call_control_id: str) -> None:
+    """Hang up an active Telnyx call."""
+    if not call_control_id:
+        return
+    url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {TELNYX_API_KEY}"},
+            )
+            print(
+                f"[TELNYX] hangup {call_control_id}: {resp.status_code}",
+                flush=True,
+            )
+    except Exception as e:
+        print(
+            f"[TELNYX] hangup failed {call_control_id}: {type(e).__name__}: {e}",
+            flush=True,
+        )
+
+
 async def run_call_job(ctx, cfg_token: str) -> None:
     redis = ctx["redis"]
     try:

@@ -9,8 +9,13 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from sarvamai import AsyncSarvamAI
 
-from agent_config import ConversationSession
-from arq_jobs import done_key, set_call_status
+from agent_config import (
+    ConversationSession,
+    append_call_end_instructions,
+    evaluate_hangup_confidence,
+    parse_agent_reply,
+)
+from arq_jobs import done_key, hangup_telnyx_call, set_call_status
 from calendar_provider import default_calendar_provider
 from config import (
     DEEPGRAM_API_KEY,
@@ -92,7 +97,7 @@ async def run_media_stream(
     await websocket.accept()
     print(f"[{call_sid}] Telnyx WebSocket connected", flush=True)
 
-    system_prompt = call_cfg["system_prompt"]
+    system_prompt = append_call_end_instructions(call_cfg["system_prompt"])
     opening_greeting = call_cfg["opening_greeting"]
     base_system_prompt = system_prompt
     session: ConversationSession | None = None
@@ -101,6 +106,8 @@ async def run_media_stream(
         if call_cfg.get("_ai_disclosure_done"):
             session.ai_disclosure_done = True
     duration_timer: asyncio.Task | None = None
+    call_control_id: str | None = None
+    hangup_requested = False
     el_model = call_cfg["elevenlabs_model"]
     voice_id = call_cfg["voice_id"]
     dg_url = deepgram_ws_url(call_cfg["deepgram_language"])
@@ -135,6 +142,46 @@ async def run_media_stream(
             return 0.0
         return round((dt.datetime.now(dt.timezone.utc) - started_at).total_seconds(), 2)
 
+    async def _hangup_call(reason: str) -> None:
+        nonlocal hangup_requested
+        if hangup_requested:
+            return
+        hangup_requested = True
+        if session:
+            session.call_should_end = True
+            session.end_call_reason = reason
+            session.sync_to_cfg()
+        elif call_cfg is not None:
+            call_cfg["_conversation_state"] = {
+                **(call_cfg.get("_conversation_state") or {}),
+                "endCallReason": reason,
+            }
+        if call_control_id:
+            await hangup_telnyx_call(call_control_id)
+        print(f"[{call_sid}] Call ended by agent ({reason})", flush=True)
+
+    async def _speak_and_maybe_hangup(text: str, hangup_reason: str | None = None) -> None:
+        spoken, marker_hangup = parse_agent_reply(text)
+        should_hangup = bool(hangup_reason)
+        reason = hangup_reason
+
+        if not should_hangup:
+            if session:
+                should_hangup, reason = evaluate_hangup_confidence(
+                    session, spoken, marker_hangup
+                )
+            elif marker_hangup:
+                should_hangup = True
+                reason = "agent_confident_end"
+
+        conversation_history.append({"role": "assistant", "content": spoken})
+        turns.append({"role": "agent", "text": spoken, "ts": _ts()})
+        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {spoken}", flush=True)
+        await send_audio(spoken)
+
+        if should_hangup and reason:
+            await _hangup_call(reason)
+
     async def _handle_user_turn(user_text: str) -> None:
         nonlocal agent_speaking
 
@@ -148,29 +195,20 @@ async def run_media_stream(
         if session:
             opt_out_line = session.check_compliance_on_user_input(user_text)
             if opt_out_line:
-                conversation_history.append({"role": "assistant", "content": opt_out_line})
-                turns.append({"role": "agent", "text": opt_out_line, "ts": _ts()})
-                await send_audio(opt_out_line)
-                session.sync_to_cfg()
+                await _speak_and_maybe_hangup(opt_out_line, "opt_out")
                 return
 
             escalation_line = session.check_escalation(user_text)
             if escalation_line:
-                conversation_history.append({"role": "assistant", "content": escalation_line})
-                turns.append({"role": "agent", "text": escalation_line, "ts": _ts()})
-                await send_audio(escalation_line)
-                session.sync_to_cfg()
+                reason = session.escalation_reason or "escalation"
+                await _speak_and_maybe_hangup(escalation_line, reason)
                 return
 
             objection_hint = session.handle_objection(user_text)
             if session.objection_attempts >= session._max_objection_attempts():
                 soft_line = session._soft_close_line()
                 session.escalation_reason = "failed_objection_handles"
-                session.call_should_end = True
-                conversation_history.append({"role": "assistant", "content": soft_line})
-                turns.append({"role": "agent", "text": soft_line, "ts": _ts()})
-                await send_audio(soft_line)
-                session.sync_to_cfg()
+                await _speak_and_maybe_hangup(soft_line, "no_interest")
                 return
 
             session.ensure_offered_slots()
@@ -206,15 +244,12 @@ async def run_media_stream(
             agent_reply = session.enforce_reply(agent_reply)
             session.stage_turn_count += 1
             session.sync_to_cfg()
+            await _speak_and_maybe_hangup(agent_reply)
         else:
             agent_reply = await ask_llm(
                 conversation_history, system_prompt, llm_provider, llm_model
             )
-
-        conversation_history.append({"role": "assistant", "content": agent_reply})
-        turns.append({"role": "agent", "text": agent_reply, "ts": _ts()})
-        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-        await send_audio(agent_reply)
+            await _speak_and_maybe_hangup(agent_reply)
 
     async def _duration_watchdog() -> None:
         if not session:
@@ -229,12 +264,8 @@ async def run_media_stream(
             "I want to respect your time, so I'll wrap up here. "
             "Thank you — we'll follow up with details. Goodbye."
         )
-        session.call_should_end = True
         session.escalation_reason = session.escalation_reason or "max_call_duration"
-        conversation_history.append({"role": "assistant", "content": close_line})
-        turns.append({"role": "agent", "text": close_line, "ts": _ts()})
-        await send_audio(close_line)
-        session.sync_to_cfg()
+        await _speak_and_maybe_hangup(close_line, "max_call_duration")
         print(f"[{call_sid}] Max call duration reached ({max_sec}s)", flush=True)
 
     # ── TTS sender ─────────────────────────────────────────────────────────────
@@ -294,7 +325,7 @@ async def run_media_stream(
 
     # ── Telnyx receiver ────────────────────────────────────────────────────────
     async def receive_from_telnyx() -> None:
-        nonlocal stream_id, started_at, connected, agent_speaking, duration_timer
+        nonlocal stream_id, started_at, connected, agent_speaking, duration_timer, call_control_id
 
         last_barge_in_at: dt.datetime | None = None
         # ── Tunables ──────────────────────────────────────────────────────────
