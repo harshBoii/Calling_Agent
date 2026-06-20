@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 TELNYX_MESSAGES_URL = "https://api.telnyx.com/v2/messages"
 
 
-async def send_telnyx_sms(to: str, message: str) -> str | None:
+async def send_telnyx_sms(
+    to: str,
+    message: str,
+    *,
+    from_number: str | None = None,
+) -> str | None:
     """
     POST to Telnyx /v2/messages. On success return message id; on any failure
     log and return None (never raises).
@@ -32,7 +37,7 @@ async def send_telnyx_sms(to: str, message: str) -> str | None:
             return None
 
         payload: dict[str, Any] = {
-            "from": TELNYX_PHONE_NUMBER,
+            "from": (from_number or TELNYX_PHONE_NUMBER).strip(),
             "to": to_s,
             "text": text,
         }

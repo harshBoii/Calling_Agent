@@ -24,14 +24,24 @@ REDIS_URL = os.environ["REDIS_URL"].strip()
 
 ONCALL_QUEUE = "calls:oncall"
 CAMPAIGN_QUEUE = "calls:campaign"
+MESSAGES_ONCALL_QUEUE = "messages:oncall"
+MESSAGES_CAMPAIGN_QUEUE = "messages:campaign"
 CFG_TTL_SEC = 3600
+MSG_CFG_TTL_SEC = 3600
 STATUS_TTL_SEC = 86400
 ON_DEMAND_DEADLINE_SEC = 15
 CALL_DONE_TIMEOUT_SEC = 14400
 
-# ─── Next.js webhook destination ─────────────────────────────────────────────
+# ─── Email (Resend) ───────────────────────────────────────────────────────────
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+DEFAULT_FROM_EMAIL = (os.environ.get("DEFAULT_FROM_EMAIL") or "").strip() or None
+
+# ─── Webhooks ─────────────────────────────────────────────────────────────────
 NEXT_JS_SERVICE_URL = os.environ["NEXT_JS_SERVICE_URL"].rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+WEBHOOK_CALL = os.environ.get("WEBHOOK_CALL", "").strip()
+WEBHOOK_SMS = os.environ.get("WEBHOOK_SMS", "").strip()
+WEBHOOK_EMAIL = os.environ.get("WEBHOOK_EMAIL", "").strip()
 
 # ─── STT ──────────────────────────────────────────────────────────────────────
 DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]

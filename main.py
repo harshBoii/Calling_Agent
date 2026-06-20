@@ -13,16 +13,21 @@ from arq_jobs import cfg_key, set_call_status, start_key, status_key
 from config import (
     CAMPAIGN_QUEUE,
     CFG_TTL_SEC,
+    DEFAULT_FROM_EMAIL,
+    MESSAGES_CAMPAIGN_QUEUE,
+    MESSAGES_ONCALL_QUEUE,
+    MSG_CFG_TTL_SEC,
     ON_DEMAND_DEADLINE_SEC,
     ONCALL_QUEUE,
     REDIS_URL,
     SYSTEM_PROMPT_TEMPLATE,
+    TELNYX_PHONE_NUMBER,
     build_call_config,
     prepend_previous_chat_context,
 )
 from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
-from sms import send_telnyx_sms
+from message_jobs import msg_cfg_key, msg_start_key, msg_status_key, set_message_status
 
 arq_pool = None
 redis_client: aioredis.Redis | None = None
@@ -63,6 +68,71 @@ def _normalize_to_e164(raw: str) -> str:
     return s
 
 
+def _parse_message_type(body: dict) -> str:
+    message_type = body.get("message_type", "campaign")
+    if message_type not in ("on_demand", "campaign"):
+        raise HTTPException(
+            status_code=400,
+            detail="message_type must be 'on_demand' or 'campaign'",
+        )
+    return message_type
+
+
+async def _enqueue_message(payload: dict, message_type: str) -> dict:
+    if arq_pool is None or redis_client is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    task_token = str(uuid.uuid4())
+    payload["message_type"] = message_type
+    payload["_enqueue_time"] = time.time()
+    payload["_ids"] = {
+        "companyId": payload.pop("companyId", None),
+        "leadId": payload.pop("leadId", None),
+        "campaignId": payload.pop("campaignId", None),
+    }
+
+    await redis_client.set(msg_cfg_key(task_token), json.dumps(payload), ex=MSG_CFG_TTL_SEC)
+    await set_message_status(redis_client, task_token, "queued")
+
+    queue = MESSAGES_ONCALL_QUEUE if message_type == "on_demand" else MESSAGES_CAMPAIGN_QUEUE
+    job = await arq_pool.enqueue_job("run_message_job", task_token, _queue_name=queue)
+
+    if message_type == "campaign":
+        return {
+            "status": "queued",
+            "task_token": task_token,
+            "job_id": job.job_id,
+        }
+
+    result = await redis_client.blpop(msg_start_key(task_token), timeout=ON_DEMAND_DEADLINE_SEC)
+    if result is None:
+        try:
+            await job.abort()
+        except Exception as e:
+            print(f"[MSG {task_token}] job.abort failed: {e}", flush=True)
+        await set_message_status(redis_client, task_token, "expired")
+        raise HTTPException(
+            status_code=503,
+            detail="Agent busy, try again shortly",
+        )
+
+    _key, payload_raw = result
+    start_payload = json.loads(payload_raw)
+    if start_payload.get("error"):
+        await set_message_status(redis_client, task_token, start_payload["error"])
+        raise HTTPException(
+            status_code=503,
+            detail="Agent busy, try again shortly",
+        )
+
+    return {
+        "status": "sent",
+        "id": start_payload.get("id"),
+        "task_token": task_token,
+        "job_id": job.job_id,
+    }
+
+
 @app.get("/health")
 async def health():
     return {"ok": True}
@@ -78,9 +148,26 @@ async def call_status(cfg_token: str):
     return {"cfg_token": cfg_token, "status": status}
 
 
+@app.get("/message/status/{task_token}")
+async def message_status(task_token: str):
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    status = await redis_client.get(msg_status_key(task_token))
+    if status is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    channel = None
+    raw_cfg = await redis_client.get(msg_cfg_key(task_token))
+    if raw_cfg:
+        try:
+            channel = json.loads(raw_cfg).get("channel")
+        except json.JSONDecodeError:
+            pass
+    return {"task_token": task_token, "status": status, "channel": channel}
+
+
 @app.post("/sms/send")
 async def sms_send(request: Request):
-    """Test or external trigger: send SMS via Telnyx. JSON: to (+E164), message."""
+    """Queue outbound SMS via Telnyx. JSON: to (+E164), message, optional from, message_type."""
     body = await request.json()
     raw_to = body.get("to")
     raw_message = body.get("message")
@@ -96,13 +183,64 @@ async def sms_send(request: Request):
     if not message:
         raise HTTPException(status_code=400, detail="'message' must be non-empty")
 
-    msg_id = await send_telnyx_sms(to, message)
-    if msg_id is None:
+    message_type = _parse_message_type(body)
+    from_number = body.get("from")
+    if from_number is not None:
+        from_number = _normalize_to_e164(str(from_number))
+        if not _E164_RE.match(from_number):
+            raise HTTPException(status_code=400, detail="'from' must be valid +E164")
+
+    payload = {
+        "channel": "sms",
+        "to": to,
+        "message": message,
+        "from": from_number or TELNYX_PHONE_NUMBER,
+        "companyId": body.get("companyId"),
+        "leadId": body.get("leadId"),
+        "campaignId": body.get("campaignId"),
+    }
+    return await _enqueue_message(payload, message_type)
+
+
+@app.post("/email/send")
+async def email_send(request: Request):
+    """Queue outbound email via Resend."""
+    body = await request.json()
+    raw_to = body.get("to")
+    raw_subject = body.get("subject")
+    raw_body = body.get("body")
+    if raw_to is None or raw_subject is None or raw_body is None:
+        raise HTTPException(status_code=400, detail="Missing 'to', 'subject', or 'body'")
+
+    to = str(raw_to).strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="'to' must be non-empty")
+
+    subject = str(raw_subject).strip()
+    html_body = str(raw_body).strip()
+    if not subject or not html_body:
+        raise HTTPException(status_code=400, detail="'subject' and 'body' must be non-empty")
+
+    from_addr = (body.get("from") or DEFAULT_FROM_EMAIL or "").strip()
+    if not from_addr:
         raise HTTPException(
-            status_code=502,
-            detail="Failed to send SMS; check server logs for Telnyx error",
+            status_code=400,
+            detail="Missing 'from' (or set DEFAULT_FROM_EMAIL in env)",
         )
-    return {"id": msg_id}
+
+    message_type = _parse_message_type(body)
+    payload = {
+        "channel": "email",
+        "to": to,
+        "from": from_addr,
+        "subject": subject,
+        "body": html_body,
+        "text": body.get("text"),
+        "companyId": body.get("companyId"),
+        "leadId": body.get("leadId"),
+        "campaignId": body.get("campaignId"),
+    }
+    return await _enqueue_message(payload, message_type)
 
 
 @app.post("/call/outbound")

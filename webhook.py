@@ -10,7 +10,13 @@ import uuid
 
 import httpx
 
-from config import NEXT_JS_SERVICE_URL, WEBHOOK_SECRET
+from config import (
+    NEXT_JS_SERVICE_URL,
+    WEBHOOK_CALL,
+    WEBHOOK_EMAIL,
+    WEBHOOK_SECRET,
+    WEBHOOK_SMS,
+)
 from llm import ask_llm_for_analysis
 
 
@@ -276,18 +282,22 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
     }
 
 
-async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
-    """Analyze the transcript and POST the call-completed event to the Next.js service."""
-    analysis = await analyze_transcript(
-        call_record.get("turns") or [],
-        cfg,
-        call_ended_at=call_record.get("ended_at"),
-    )
-    payload = build_payload(call_record, cfg, analysis)
+def _call_webhook_url() -> str | None:
+    if WEBHOOK_CALL:
+        return WEBHOOK_CALL
+    if NEXT_JS_SERVICE_URL:
+        return f"{NEXT_JS_SERVICE_URL}/api/calling-agent/webhook"
+    return None
 
-    url = f"{NEXT_JS_SERVICE_URL}/api/calling-agent/webhook"
+
+async def deliver_webhook(url: str, payload: dict, event_type: str) -> None:
+    """POST signed JSON to url with 3 retries. Never raises."""
+    if not url:
+        print(f"[WEBHOOK] no URL for {event_type}; skipped", flush=True)
+        return
     if not WEBHOOK_SECRET:
-        raise ValueError("WEBHOOK_SECRET is not set; cannot sign webhook request")
+        print(f"[WEBHOOK] WEBHOOK_SECRET not set; skipped {event_type}", flush=True)
+        return
 
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     sig_hex = hmac.new(
@@ -310,22 +320,142 @@ async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
                 r = await client.post(url, content=raw, headers=headers)
                 r.raise_for_status()
                 print(
-                    f"[WEBHOOK] delivered {payload['eventId']} "
-                    f"(call={payload['call']['externalCallId']}) → {r.status_code}",
+                    f"[WEBHOOK] delivered {payload['eventId']} ({event_type}) → {r.status_code}",
                     flush=True,
                 )
                 return
             except Exception as e:
                 last_err = e
                 print(
-                    f"[WEBHOOK] POST attempt {attempt + 1}/3 failed: "
+                    f"[WEBHOOK] POST attempt {attempt + 1}/3 failed ({event_type}): "
                     f"{type(e).__name__}: {e}",
                     flush=True,
                 )
                 await asyncio.sleep(0.5 * (2 ** attempt))
 
     print(
-        f"[WEBHOOK] gave up delivering {payload['eventId']} after 3 tries; "
+        f"[WEBHOOK] gave up delivering {payload['eventId']} ({event_type}); "
         f"last error: {last_err}",
         flush=True,
     )
+
+
+def build_sms_payload(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> dict:
+    ids = cfg.get("_ids") or {}
+    return {
+        "event": "sms.completed",
+        "eventId": f"evt_{uuid.uuid4().hex}",
+        "occurredAt": _iso(dt.datetime.now(dt.timezone.utc)),
+        "companyId": ids.get("companyId") or cfg.get("companyId"),
+        "leadId": ids.get("leadId") or cfg.get("leadId"),
+        "campaignId": ids.get("campaignId") or cfg.get("campaignId"),
+        "message": {
+            "taskToken": task_token,
+            "externalId": external_id,
+            "from": cfg.get("from"),
+            "to": cfg.get("to"),
+            "body": cfg.get("message") or cfg.get("body"),
+            "status": status,
+            "messageType": cfg.get("message_type", "campaign"),
+            "provider": "telnyx",
+            "error": error,
+        },
+    }
+
+
+def build_email_payload(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> dict:
+    ids = cfg.get("_ids") or {}
+    return {
+        "event": "email.completed",
+        "eventId": f"evt_{uuid.uuid4().hex}",
+        "occurredAt": _iso(dt.datetime.now(dt.timezone.utc)),
+        "companyId": ids.get("companyId") or cfg.get("companyId"),
+        "leadId": ids.get("leadId") or cfg.get("leadId"),
+        "campaignId": ids.get("campaignId") or cfg.get("campaignId"),
+        "message": {
+            "taskToken": task_token,
+            "externalId": external_id,
+            "from": cfg.get("from"),
+            "to": cfg.get("to"),
+            "subject": cfg.get("subject"),
+            "status": status,
+            "messageType": cfg.get("message_type", "campaign"),
+            "provider": "resend",
+            "error": error,
+        },
+    }
+
+
+async def send_sms_completed_webhook(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if not WEBHOOK_SMS:
+        print("[WEBHOOK] WEBHOOK_SMS not set; skipped sms.completed", flush=True)
+        return
+    payload = build_sms_payload(
+        task_token=task_token,
+        cfg=cfg,
+        external_id=external_id,
+        status=status,
+        error=error,
+    )
+    await deliver_webhook(WEBHOOK_SMS, payload, "sms.completed")
+
+
+async def send_email_completed_webhook(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if not WEBHOOK_EMAIL:
+        print("[WEBHOOK] WEBHOOK_EMAIL not set; skipped email.completed", flush=True)
+        return
+    payload = build_email_payload(
+        task_token=task_token,
+        cfg=cfg,
+        external_id=external_id,
+        status=status,
+        error=error,
+    )
+    await deliver_webhook(WEBHOOK_EMAIL, payload, "email.completed")
+
+
+async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
+    """Analyze the transcript and POST the call-completed event."""
+    analysis = await analyze_transcript(
+        call_record.get("turns") or [],
+        cfg,
+        call_ended_at=call_record.get("ended_at"),
+    )
+    payload = build_payload(call_record, cfg, analysis)
+
+    url = _call_webhook_url()
+    if not url:
+        print("[WEBHOOK] no call webhook URL configured; skipped call.completed", flush=True)
+        return
+    try:
+        await deliver_webhook(url, payload, "call.completed")
+    except Exception as e:
+        print(f"[WEBHOOK] call.completed error: {type(e).__name__}: {e}", flush=True)

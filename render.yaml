@@ -21,6 +21,16 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         sync: false
+      - key: WEBHOOK_CALL
+        sync: false
+      - key: WEBHOOK_SMS
+        sync: false
+      - key: WEBHOOK_EMAIL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
       - key: DEEPGRAM_API_KEY
         sync: false
       - key: ELEVENLABS_API_KEY
@@ -57,6 +67,8 @@ services:
       - key: NEXT_JS_SERVICE_URL
         sync: false
       - key: WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_CALL
         sync: false
       - key: DEEPGRAM_API_KEY
         sync: false
@@ -95,6 +107,8 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         sync: false
+      - key: WEBHOOK_CALL
+        sync: false
       - key: DEEPGRAM_API_KEY
         sync: false
       - key: ELEVENLABS_API_KEY
@@ -110,4 +124,54 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: SARVAM_API_KEY
+        sync: false
+
+  - type: worker
+    name: calling-agent-messaging-oncall-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: arq messaging_oncall_worker.MessagingOnDemandWorkerSettings
+    envVars:
+      - key: REDIS_URL
+        sync: false
+      - key: TELNYX_API_KEY
+        sync: false
+      - key: TELNYX_PHONE_NUMBER
+        sync: false
+      - key: TELNYX_MESSAGING_PROFILE_ID
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_SMS
+        sync: false
+      - key: WEBHOOK_EMAIL
+        sync: false
+
+  - type: worker
+    name: calling-agent-messaging-campaign-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: arq messaging_campaign_worker.MessagingCampaignWorkerSettings
+    envVars:
+      - key: REDIS_URL
+        sync: false
+      - key: TELNYX_API_KEY
+        sync: false
+      - key: TELNYX_PHONE_NUMBER
+        sync: false
+      - key: TELNYX_MESSAGING_PROFILE_ID
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_SMS
+        sync: false
+      - key: WEBHOOK_EMAIL
         sync: false
