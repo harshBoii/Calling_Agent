@@ -80,6 +80,16 @@ Header value: "sha256=" + hex
 
 Up to **3 retries** with exponential backoff on failure. Your endpoint should return `2xx`.
 
+**Delivery requirements:** Webhooks are only sent when all of the following are true for that channel:
+
+| Channel | URL env | Also required |
+|---------|---------|---------------|
+| Calls | `WEBHOOK_CALL` **or** `NEXT_JS_SERVICE_URL` (fallback path below) | `WEBHOOK_SECRET` |
+| SMS | `WEBHOOK_SMS` | `WEBHOOK_SECRET` |
+| Email | `WEBHOOK_EMAIL` | `WEBHOOK_SECRET` |
+
+If `WEBHOOK_SECRET` is unset, delivery is skipped (logged server-side, no HTTP POST). If a channel URL is unset, that channel's webhook is skipped.
+
 ---
 
 ## Health
