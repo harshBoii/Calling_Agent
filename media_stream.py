@@ -331,7 +331,7 @@ async def run_media_stream(
         # ── Tunables ──────────────────────────────────────────────────────────
         # Lower RMS threshold = more sensitive to quiet speech.
         # Raise it if you get false interrupts from background noise.
-        barge_in_rms_threshold = 450   # was 700 — lowered for faster response
+        barge_in_rms_threshold = 570   # was 700 — lowered for faster response
         barge_in_cooldown_sec = 0.6    # ignore further triggers for this long
 
         try:
