@@ -4,6 +4,7 @@ import base64
 import contextlib
 import datetime as dt
 import json
+import re
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
@@ -27,6 +28,22 @@ from config import (
 from llm import ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook
+
+_VOICEMAIL_PHRASE = (
+    "forwarded to voice mail the person you are trying to reach is not available"
+)
+
+
+def _normalize_transcript_for_match(text: str) -> str:
+    s = re.sub(r"[^a-z0-9 ]", "", text.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.replace("voice mail", "voicemail")
+
+
+def is_voicemail_transcript(text: str) -> bool:
+    normalized = _normalize_transcript_for_match(text)
+    target = _normalize_transcript_for_match(_VOICEMAIL_PHRASE)
+    return target in normalized
 
 
 async def _shutdown_task(task: asyncio.Task, call_sid: str, label: str) -> None:
@@ -136,6 +153,7 @@ async def run_media_stream(
     ended_at: dt.datetime | None = None
     connected = False
     turns: list[dict] = []
+    first_user_turn = True
 
     def _ts() -> float:
         if started_at is None:
@@ -182,11 +200,31 @@ async def run_media_stream(
         if should_hangup and reason:
             await _hangup_call(reason)
 
+    async def _check_and_handle_voicemail(text: str) -> bool:
+        nonlocal connected
+        if hangup_requested or not is_voicemail_transcript(text):
+            return False
+        print(f"[{call_sid}] 📵 Voicemail detected — hanging up immediately", flush=True)
+        conversation_history.append({"role": "user", "content": text})
+        turns.append({"role": "user", "text": text, "ts": _ts()})
+        connected = False
+        if session:
+            session.call_should_end = True
+            session.end_call_reason = "voicemail"
+            session.sync_to_cfg()
+        await _hangup_call("voicemail")
+        return True
+
     async def _handle_user_turn(user_text: str) -> None:
-        nonlocal agent_speaking
+        nonlocal agent_speaking, first_user_turn
 
         if session and session.call_should_end:
             return
+
+        if first_user_turn:
+            first_user_turn = False
+            if await _check_and_handle_voicemail(user_text):
+                return
 
         print(f"[{call_sid}] 🎤 Human: {user_text}", flush=True)
         conversation_history.append({"role": "user", "content": user_text})
