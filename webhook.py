@@ -29,7 +29,7 @@ _ANALYSIS_SYSTEM_PROMPT = (
     "Return STRICT JSON (no prose, no markdown fences) with EXACTLY these keys:\n"
     '  - "summary" (string): 1-3 sentence summary of the call.\n'
     '  - "outcome" (string): one of '
-    "INTERESTED, NOT_INTERESTED, CALLBACK, VOICEMAIL, NO_ANSWER, DO_NOT_CALL, UNKNOWN.\n"
+    "INTERESTED, NOT_INTERESTED, MEET_REQUESTED, VOICEMAIL, NO_ANSWER, DO_NOT_CALL, UNKNOWN.\n"
     '  - "followUpAgreed" (boolean): true if the lead explicitly agreed to a follow-up call or scheduled callback; otherwise false.\n'
     '  - "followUpAt" (string|null): the scheduled follow-up time as an ISO-8601 UTC timestamp (e.g. "2026-04-23T15:30:00Z") if the time can be determined; otherwise null.\n'
     '  - "sentiment" (string): one of POSITIVE, NEUTRAL, NEGATIVE.\n'
