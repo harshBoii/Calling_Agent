@@ -27,7 +27,7 @@ from config import (
 )
 from llm import ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
-from webhook import send_call_completed_webhook
+from webhook import send_call_completed_webhook, send_call_status_webhook
 
 _VOICEMAIL_PHRASE = (
     "forwarded to voice mail the person you are trying to reach is not available"
@@ -380,6 +380,17 @@ async def run_media_stream(
 
                 if event == "connected":
                     print(f"[{call_sid}] Telnyx connected", flush=True)
+                    if redis_client and cfg_token:
+                        asyncio.create_task(
+                            set_call_status(redis_client, cfg_token, "dialling")
+                        )
+                    asyncio.create_task(
+                        send_call_status_webhook(
+                            call_sid=call_sid,
+                            cfg=call_cfg,
+                            status="dialling",
+                        )
+                    )
 
                 elif event == "start":
                     stream_id = data.get("stream_id") or data.get("start", {}).get("streamSid")

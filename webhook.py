@@ -451,6 +451,46 @@ async def send_email_completed_webhook(
     await deliver_webhook(WEBHOOK_EMAIL, payload, "email.completed")
 
 
+def build_call_status_payload(
+    cfg: dict,
+    *,
+    call_sid: str,
+    status: str,
+) -> dict:
+    ids = cfg.get("_ids") or {}
+    return {
+        "event": "call.status",
+        "eventId": f"evt_{uuid.uuid4().hex}",
+        "occurredAt": _iso(dt.datetime.now(dt.timezone.utc)),
+        "companyId": ids.get("companyId"),
+        "call": {
+            "externalCallId": call_sid,
+            "leadId": ids.get("leadId"),
+            "phone": cfg.get("_phone"),
+            "direction": "OUTBOUND",
+            "status": status,
+            "campaignId": ids.get("campaignId"),
+        },
+    }
+
+
+async def send_call_status_webhook(
+    *,
+    call_sid: str,
+    cfg: dict,
+    status: str,
+) -> None:
+    payload = build_call_status_payload(cfg, call_sid=call_sid, status=status)
+    url = _call_webhook_url()
+    if not url:
+        print("[WEBHOOK] no call webhook URL configured; skipped call.status", flush=True)
+        return
+    try:
+        await deliver_webhook(url, payload, "call.status")
+    except Exception as e:
+        print(f"[WEBHOOK] call.status error: {type(e).__name__}: {e}", flush=True)
+
+
 async def send_call_completed_webhook(call_record: dict, cfg: dict) -> None:
     """Analyze the transcript and POST the call-completed event."""
     analysis = await analyze_transcript(
