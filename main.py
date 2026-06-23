@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -29,6 +30,7 @@ from config import (
     build_call_config,
     prepend_previous_chat_context,
 )
+from intent_detection import preload_intent_model
 from llm import generate_opening_greeting, generate_questions_to_ask
 from media_stream import run_media_stream
 from message_jobs import (
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
         arq_pool = await create_pool(RedisSettings.from_dsn(REDIS_URL))
     else:
         arq_pool = None
+    await asyncio.to_thread(preload_intent_model)
     yield
     if arq_pool is not None:
         await arq_pool.close()

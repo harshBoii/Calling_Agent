@@ -15,3 +15,4 @@ pydub
 arq
 redis
 resend
+sentence-transformers

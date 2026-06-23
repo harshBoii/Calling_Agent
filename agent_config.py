@@ -158,6 +158,53 @@ def normalize_meet_slots(raw: list | None) -> list[dict]:
     return out
 
 
+_SLOT_LABEL_RE = re.compile(r"^(\w{3} \w{3} \d{1,2})\s+(.+)$")
+
+
+def _parse_slot_day_time(slot: dict) -> tuple[str, str] | None:
+    label = (slot.get("label") or "").strip()
+    label = re.sub(r"\s+(UTC|IST|GMT.*)$", "", label, flags=re.IGNORECASE)
+    label = label.replace(",", "").strip()
+    match = _SLOT_LABEL_RE.match(label)
+    if match:
+        return match.group(1), match.group(2).strip()
+    start_at = slot.get("startAt") or slot.get("id")
+    if not start_at:
+        return None
+    try:
+        ts = start_at.replace("Z", "+00:00")
+        dt_val = dt.datetime.fromisoformat(ts)
+        day = dt_val.strftime("%a %b %d")
+        time_str = dt_val.strftime("%I:%M %p").lstrip("0").replace(" 0", " ")
+        return day, time_str
+    except ValueError:
+        return None
+
+
+def format_slots_compact(slots: list[dict]) -> str:
+    """Human-readable grouped slot list for LLM prompts."""
+    if not slots:
+        return ""
+    by_day: dict[str, list[str]] = {}
+    day_order: list[str] = []
+    for slot in slots:
+        parsed = _parse_slot_day_time(slot)
+        if not parsed:
+            continue
+        day, time_str = parsed
+        if day not in by_day:
+            by_day[day] = []
+            day_order.append(day)
+        if time_str not in by_day[day]:
+            by_day[day].append(time_str)
+    if not day_order:
+        return ""
+    lines = ["Available slots:"]
+    for day in day_order:
+        lines.append(f"- {day}: {', '.join(by_day[day])}")
+    return "\n".join(lines)
+
+
 def parse_agent_reply(reply: str) -> tuple[str, bool]:
     """Strip hangup marker from spoken text. Returns (spoken, should_hangup)."""
     if HANGUP_MARKER in reply:
@@ -322,7 +369,6 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
             "Call context",
             [
                 f"Lead name: {cfg.get('name')}",
-                f"Product: {cfg.get('product')}",
                 f"Offer: {cfg.get('perks_of_product')}",
                 f"Lead intel (use subtly): {cfg.get('info_about_lead')}",
             ],
@@ -605,15 +651,27 @@ class ConversationSession:
 
         remaining = max(0, stage.get("maxTurns", 2) - self.stage_turn_count)
         slot_hint = ""
-        if self.current_stage_key == "slot_suggestion" and self.offered_slots:
-            details = []
-            for i, slot in enumerate(self.offered_slot_records or [], start=1):
-                lbl = slot.get("label") or self.offered_slots[i - 1]
-                details.append(f"{i}. {lbl}")
-            if details:
-                slot_hint = f"\nOffer these slots (exactly {len(details)}): " + "; ".join(details)
-            else:
-                slot_hint = f"\nOffer these slots: {', '.join(self.offered_slots)}"
+        if self.current_stage_key == "slot_suggestion":
+            count = self._slots_to_offer_count()
+            if self.available_slots:
+                compact = format_slots_compact(self.available_slots)
+                if compact:
+                    slot_hint = (
+                        f"\n{compact}\n"
+                        f"Offer exactly {count} options from the list above."
+                    )
+            elif self.offered_slots:
+                details = []
+                for i, slot in enumerate(self.offered_slot_records or [], start=1):
+                    lbl = slot.get("label") or self.offered_slots[i - 1]
+                    details.append(f"{i}. {lbl}")
+                if details:
+                    slot_hint = (
+                        f"\nOffer these slots (exactly {len(details)}): "
+                        + "; ".join(details)
+                    )
+                else:
+                    slot_hint = f"\nOffer these slots: {', '.join(self.offered_slots)}"
 
         stage_block = f"""## Active stage: {stage.get('label')} ({stage.get('key')})
 Goal: {stage.get('goal')}

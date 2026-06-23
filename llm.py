@@ -73,7 +73,6 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
 
 Generate a warm, natural opening line for a phone call. Respond with text written only in {cfg['language']}:
 - Introduce yourself as {cfg['agent_name']} from {cfg['company']}
-- Mention you're calling about {cfg['product']}
 - Tease the offer: {cfg['perks_of_product']}
 - End with a soft permission question ("Is this a good time?")
 - Sound like a real human — not scripted or robotic
@@ -187,7 +186,6 @@ async def generate_questions_to_ask(cfg: dict, provider: str | None = None) -> s
 Context:
 - Language: {cfg.get('language')}
 - Company: {cfg.get('company')}
-- Product: {cfg.get('product')}
 - Offer: {cfg.get('perks_of_product')}
 - Lead context (use subtly): {cfg.get('info_about_lead')}{goal_note}{blacklist_note}
 

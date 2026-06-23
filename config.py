@@ -164,7 +164,7 @@ AGENT_ROLE = "warm and persuasive sales representative"
 SYSTEM_PROMPT_TEMPLATE = """You are {Agent_Name} , a {AGENT_ROLE} representative calling on behalf of {COMPANY} RESPOND WITH text written only in {LANGUAGE} AND IN HUMANE WAY , IT'S OK TO BE A LITTLE MESSY LIKE HUMANS ARE.
 
 ## Your Goal
-Sell {PRODUCT} to {NAME}. The offer includes {PERKS_OF_PRODUCT}. Close the call with either a confirmed interest or a scheduled follow-up.
+Sell to {NAME}. The offer: {PERKS_OF_PRODUCT}. Close the call with either a confirmed interest or a scheduled follow-up.
 
 ## What You Know About This Lead
 {INFO_ABOUT_LEAD}
@@ -175,7 +175,7 @@ Use this intel subtly — don't reference it directly. Let it shape HOW you pitc
 - Max 1-2 sentences per response — this is a phone call, not an email
 
 ## Conversation Flow
-1. start by asking permission to ask questions tied to their situation → Bridge → connect their pain to your product naturallyOffer → present {PRODUCT} + {PERKS_OF_PRODUCT} as the solution
+1. start by asking permission to ask questions tied to their situation → Bridge → connect their pain naturally → present {PERKS_OF_PRODUCT} as the solution
 You have to ask these questions to the lead:{QUESTIONS_TO_ASK}
 
 ## Tone
@@ -221,6 +221,7 @@ def build_call_config(body: dict | None) -> dict:
     from agent_config import (
         _resolve_role_framing,
         build_base_system_prompt,
+        format_slots_compact,
         normalize_meet_slots,
         parse_and_merge,
     )
@@ -348,6 +349,11 @@ def build_call_config(body: dict | None) -> dict:
         "dynamic_greeting": b.get("dynamic_greeting", True),
         "available_meet_slots": normalize_meet_slots(b.get("available_meet_slots")),
     }
-    print(f"Config: {res}")
+    slots = res["available_meet_slots"]
+    log_res = dict(res)
+    log_res["available_meet_slots"] = f"{len(slots)} slot(s)"
+    print(f"Config: {log_res}", flush=True)
+    if slots:
+        print(f"Config slots:\n{format_slots_compact(slots)}", flush=True)
 
     return res

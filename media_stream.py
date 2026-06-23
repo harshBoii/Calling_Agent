@@ -25,6 +25,7 @@ from config import (
     deepgram_ws_url,
     to_sarvam_lang,
 )
+from intent_detection import build_intent_context, detect_intents
 from llm import ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook, send_call_status_webhook
@@ -272,6 +273,14 @@ async def run_media_stream(
                 session.offered_slot_records = []
 
             turn_prompt = session.build_turn_prompt(base_system_prompt)
+
+            intents = await asyncio.to_thread(detect_intents, user_text)
+            if intents:
+                print(f"[{call_sid}] intents={intents}", flush=True)
+            intent_block = build_intent_context(intents, session, call_cfg)
+            if intent_block:
+                turn_prompt += f"\n\n{intent_block}"
+
             if objection_hint:
                 turn_prompt += (
                     f"\n\n## Objection detected\nUse this guidance: {objection_hint}"
