@@ -241,6 +241,20 @@ Return ONLY the questions, one per line. No numbering, no bullets, no extra text
         return (cfg.get("questions_to_ask") or QUESTIONS_TO_ASK).strip()
 
 
+def _log_llm_prompt(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    conversation_history: list,
+) -> None:
+    print(f"[LLM/{provider}] model={model}", flush=True)
+    print(f"[LLM/{provider}] system_prompt:\n{system_prompt}", flush=True)
+    for i, msg in enumerate(conversation_history):
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        print(f"[LLM/{provider}] message[{i}] role={role}:\n{content}", flush=True)
+
+
 async def ask_llm(
     conversation_history: list,
     system_prompt: str,
@@ -255,6 +269,7 @@ async def ask_llm(
     model = model or DEFAULT_LLM_MODELS.get(
         provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
     )
+    _log_llm_prompt(provider, model, system_prompt, conversation_history)
     try:
         if provider == "groq":
             if not groq_client:
