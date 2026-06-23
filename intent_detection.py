@@ -1,11 +1,9 @@
-"""Layered intent detection (keyword + embedding) and per-turn prompt injection."""
+"""Intent detection (keyword/regex) and per-turn prompt injection."""
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
-
-import numpy as np
+from typing import TYPE_CHECKING
 
 from agent_config import format_slots_compact
 
@@ -253,29 +251,28 @@ _OBJECTION_INTENT_TO_LIBRARY_KEY: dict[str, str] = {
 
 _SKIP_INJECTION_INTENTS = frozenset({"opt_out", "human_request", "anger_escalation"})
 
-SIMILARITY_THRESHOLD = 0.60
-
-_model: Any = None
-_anchor_embeddings: dict[str, np.ndarray] | None = None
-
-
-def preload_intent_model() -> None:
-    """Load embedding model and precompute anchor vectors (call at startup)."""
-    global _model, _anchor_embeddings
-    if _anchor_embeddings is not None:
-        return
-    from sentence_transformers import SentenceTransformer
-
-    _model = SentenceTransformer("all-MiniLM-L6-v2")
-    _anchor_embeddings = {
-        intent: _model.encode(anchors, normalize_embeddings=True).mean(axis=0)
-        for intent, anchors in INTENT_EMBEDDING_ANCHORS.items()
-    }
-    print("[INTENT] Embedding model loaded and anchors precomputed", flush=True)
+# --- Embedding layer (disabled) ---
+# Requires sentence-transformers + PyTorch. Re-enable by adding the package back
+# to requirements.txt and uncommenting the block below.
+#
+# SIMILARITY_THRESHOLD = 0.60
+# _model: Any = None
+# _anchor_embeddings: dict[str, np.ndarray] | None = None
+#
+# def preload_intent_model() -> None:
+#     global _model, _anchor_embeddings
+#     if _anchor_embeddings is not None:
+#         return
+#     from sentence_transformers import SentenceTransformer
+#     _model = SentenceTransformer("all-MiniLM-L6-v2")
+#     _anchor_embeddings = {
+#         intent: _model.encode(anchors, normalize_embeddings=True).mean(axis=0)
+#         for intent, anchors in INTENT_EMBEDDING_ANCHORS.items()
+#     }
 
 
 def detect_intents(utterance: str) -> list[str]:
-    """Keyword match first, then embedding similarity for misses."""
+    """Match intents via keyword/regex patterns."""
     matched: set[str] = set()
     lower = utterance.lower()
 
@@ -283,16 +280,16 @@ def detect_intents(utterance: str) -> list[str]:
         if re.search(pattern, lower):
             matched.add(intent)
 
-    remaining = [i for i in INTENT_PATTERNS if i not in matched]
-    if remaining and _model is not None and _anchor_embeddings is not None:
-        utt_vec = _model.encode([utterance], normalize_embeddings=True)[0]
-        for intent in remaining:
-            anchor = _anchor_embeddings.get(intent)
-            if anchor is None:
-                continue
-            sim = float(np.dot(utt_vec, anchor))
-            if sim >= SIMILARITY_THRESHOLD:
-                matched.add(intent)
+    # remaining = [i for i in INTENT_PATTERNS if i not in matched]
+    # if remaining and _model is not None and _anchor_embeddings is not None:
+    #     utt_vec = _model.encode([utterance], normalize_embeddings=True)[0]
+    #     for intent in remaining:
+    #         anchor = _anchor_embeddings.get(intent)
+    #         if anchor is None:
+    #             continue
+    #         sim = float(np.dot(utt_vec, anchor))
+    #         if sim >= SIMILARITY_THRESHOLD:
+    #             matched.add(intent)
 
     return sorted(matched)
 
