@@ -21,6 +21,7 @@ from calendar_provider import default_calendar_provider
 from config import (
     CALL_RECORDING_DISCLOSURE,
     DEEPGRAM_API_KEY,
+    ELEVENLABS_VOICE_ID,
     MIN_WORDS_TO_RESPOND,
     SARVAM_API_KEY,
     deepgram_ws_url,
@@ -317,7 +318,7 @@ async def run_media_stream(
         print(f"[{call_sid}] Max call duration reached ({max_sec}s)", flush=True)
 
     # ── TTS sender ─────────────────────────────────────────────────────────────
-    async def send_audio(text: str) -> None:
+    async def send_audio(text: str, override_voice_id: str | None = None) -> None:
         nonlocal agent_speaking
         agent_speaking = True
         barge_in_event.clear()  # arm: clear any previous interrupt signal
@@ -327,7 +328,7 @@ async def run_media_stream(
         if use_sarvam_tts:
             tts_stream = sarvam_text_to_mp3_chunks(text, sarvam_tts_lang, sarvam_speaker)
         else:
-            tts_stream = text_to_audio_chunks(text, el_model, voice_id)
+            tts_stream = text_to_audio_chunks(text, el_model, override_voice_id or voice_id)
 
         async for audio_b64 in tts_stream:
             # ── Barge-in check BEFORE sending each chunk ──────────────────────
@@ -428,7 +429,7 @@ async def run_media_stream(
 
                     async def _play_intro():
                         if rec_msg:
-                            await send_audio(rec_msg)
+                            await send_audio(rec_msg, override_voice_id=ELEVENLABS_VOICE_ID)
                             await asyncio.sleep(0.5)
                         await send_audio(opening_greeting)
 
