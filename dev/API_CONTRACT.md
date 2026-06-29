@@ -34,7 +34,7 @@ Global env var (default **`true`**). Checked at API startup; exposed on `GET /he
 
 **Direct mode** (`USE_ARQ_QUEUE=false`) — for local dev without Arq workers:
 
-- **Calls:** always `200` with `{ "status": "initiated", "call_control_id", "opening_greeting", "cfg_token" }` — no `queued`, no `503`, no `job_id`
+- **Calls:** always `200` with `{ "status": "initiated", "call_control_id", "call_leg_id", "opening_greeting", "cfg_token" }` — no `queued`, no `503`, no `job_id`
 - **SMS / Email:** always `200` with `{ "status": "sent", "id", "task_token" }` — no `queued`, no `503`, no `job_id`
 - Completion webhooks still fire after call end / send
 - No Arq concurrency caps
@@ -240,6 +240,7 @@ Waits up to **15s** for Telnyx dial to succeed.
 ```json
 {
   "call_control_id": "v3:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "call_leg_id": "5dab5d24-73af-11f1-af53-3241a1c6a502",
   "status": "initiated",
   "opening_greeting": "Hi, Rahul, This is Annie calling from Acme Corp...",
   "cfg_token": "550e8400-e29b-41d4-a716-446655440000",
@@ -289,6 +290,7 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
   "meet_scheduled": "Tuesday June 24 at 2:00 PM",
   "call": {
     "externalCallId": "550e8400-e29b-41d4-a716-446655440000",
+    "callLegId": "5dab5d24-73af-11f1-af53-3241a1c6a502",
     "leadId": "lead_xyz",
     "phone": "+918102244713",
     "direction": "OUTBOUND",
@@ -588,7 +590,7 @@ Opened by Telnyx when a call is dialed. Not called by your frontend directly. `c
 | Action | Instant HTTP | Async webhook |
 |--------|--------------|---------------|
 | Call campaign | `{ status: "queued", cfg_token }` | `call.completed` |
-| Call on-demand | `{ status: "initiated", call_control_id }` or `503` | `call.completed` |
+| Call on-demand | `{ status: "initiated", call_control_id, call_leg_id }` or `503` | `call.completed` |
 | SMS campaign | `{ status: "queued", task_token }` | `sms.completed` |
 | SMS on-demand | `{ status: "sent", id }` or `503` | `sms.completed` |
 | Email campaign | `{ status: "queued", task_token }` | `email.completed` |

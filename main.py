@@ -334,7 +334,9 @@ async def _direct_outbound_call(cfg: dict, cfg_token: str, to_number: str) -> di
     await redis_client.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
     await set_call_status(redis_client, cfg_token, "dialling")
     try:
-        call_control_id = await dial_telnyx_call(cfg_token, to_number)
+        call_control_id, call_leg_id = await dial_telnyx_call(cfg_token, to_number)
+        cfg["_call_leg_id"] = call_leg_id
+        await redis_client.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
     except Exception as e:
         await set_call_status(redis_client, cfg_token, "dial_failed")
         raise HTTPException(status_code=502, detail=f"Dial failed: {e}")
@@ -343,6 +345,7 @@ async def _direct_outbound_call(cfg: dict, cfg_token: str, to_number: str) -> di
     return {
         "status": "initiated",
         "call_control_id": call_control_id,
+        "call_leg_id": call_leg_id,
         "opening_greeting": cfg.get("opening_greeting", ""),
         "cfg_token": cfg_token,
     }

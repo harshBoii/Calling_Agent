@@ -3,10 +3,12 @@
 import json
 import time
 
+
 import httpx
 
 from config import (
     CALL_DONE_TIMEOUT_SEC,
+    CFG_TTL_SEC,
     ON_DEMAND_DEADLINE_SEC,
     PUBLIC_BASE_URL,
     STATUS_TTL_SEC,
@@ -48,8 +50,8 @@ def _decode_redis_value(raw) -> str | None:
     return str(raw)
 
 
-async def dial_telnyx_call(cfg_token: str, to_number: str) -> str:
-    """Dial Telnyx outbound call. Returns call_control_id."""
+async def dial_telnyx_call(cfg_token: str, to_number: str) -> tuple[str, str]:
+    """Dial Telnyx outbound call. Returns (call_control_id, call_leg_id)."""
     ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -69,7 +71,8 @@ async def dial_telnyx_call(cfg_token: str, to_number: str) -> str:
         )
         print(f"[CALL {cfg_token}] [TELNYX] {resp.status_code}: {resp.text}", flush=True)
         resp.raise_for_status()
-        return resp.json()["data"]["call_control_id"]
+        data = resp.json()["data"]
+        return data["call_control_id"], data["call_leg_id"]
 
 
 async def hangup_telnyx_call(call_control_id: str) -> None:
@@ -121,7 +124,11 @@ async def run_call_job(ctx, cfg_token: str) -> None:
             return
 
         try:
-            call_control_id = await dial_telnyx_call(cfg_token, to_number)
+            call_control_id, call_leg_id = await dial_telnyx_call(cfg_token, to_number)
+            
+            # Save call_leg_id into cfg so media_stream can pass it to webhook
+            cfg["_call_leg_id"] = call_leg_id
+            await redis.set(cfg_key(cfg_token), json.dumps(cfg), ex=CFG_TTL_SEC)
         except Exception as e:
             await set_call_status(redis, cfg_token, "dial_failed")
             if call_type == "on_demand":
@@ -139,6 +146,7 @@ async def run_call_job(ctx, cfg_token: str) -> None:
                 json.dumps(
                     {
                         "call_control_id": call_control_id,
+                        "call_leg_id": call_leg_id,
                         "opening_greeting": cfg.get("opening_greeting", ""),
                     }
                 ),

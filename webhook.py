@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 
+
 import httpx
 
 from config import (
@@ -256,6 +257,7 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
         "meet_scheduled": meet_scheduled,
         "call": {
             "externalCallId": call_record.get("call_sid"),
+            "callLegId": cfg.get("_call_leg_id"),
             "leadId": ids.get("leadId"),
             "phone": phone,
             "direction": "OUTBOUND",
