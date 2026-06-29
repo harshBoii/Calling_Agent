@@ -40,6 +40,7 @@ STATUS_TTL_SEC = 86400
 ON_DEMAND_DEADLINE_SEC = 15
 CALL_DONE_TIMEOUT_SEC = 14400
 USE_ARQ_QUEUE = _env_bool("USE_ARQ_QUEUE", default=True)
+CALL_RECORDING_DISCLOSURE = _env_bool("CALL_RECORDING_DISCLOSURE", default=False)
 
 # ─── Email (Resend) ───────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()

@@ -76,7 +76,7 @@ Generate a warm, natural opening line for a phone call. Respond with text writte
 - Tease the offer: {cfg['perks_of_product']}
 - End with a soft permission question ("Is this a good time?")
 - Sound like a real human — not scripted or robotic
-- Be MAX 2-3 sentences total
+- Be MAX 1-3 short sentences total ,keep the greeting short inturn increase the chances of lead to listen and understand the pitch.
 - Speak in {cfg['language']}{goal_line}
 
 Lead context (use subtly to personalize tone, don't state it directly):

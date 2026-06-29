@@ -19,6 +19,7 @@ from agent_config import (
 from arq_jobs import done_key, hangup_telnyx_call, set_call_status
 from calendar_provider import default_calendar_provider
 from config import (
+    CALL_RECORDING_DISCLOSURE,
     DEEPGRAM_API_KEY,
     MIN_WORDS_TO_RESPOND,
     SARVAM_API_KEY,
@@ -413,13 +414,25 @@ async def run_media_stream(
                     )
                     started_at = dt.datetime.now(dt.timezone.utc)
                     connected = True
+                    rec_msg = "This Call May Be Recorded For Audit and Training Purposes" if CALL_RECORDING_DISCLOSURE else None
+                    if rec_msg:
+                        conversation_history.append({"role": "assistant", "content": rec_msg})
+                        turns.append({"role": "agent", "text": rec_msg, "ts": 0.0})
+
                     conversation_history.append({"role": "assistant", "content": opening_greeting})
                     turns.append({"role": "agent", "text": opening_greeting, "ts": 0.0})
                     if session and call_cfg.get("_ai_disclosure_done"):
                         session.ai_disclosure_done = True
                     if session and session._max_call_duration_sec():
                         duration_timer = asyncio.create_task(_duration_watchdog())
-                    asyncio.create_task(send_audio(opening_greeting))
+
+                    async def _play_intro():
+                        if rec_msg:
+                            await send_audio(rec_msg)
+                            await asyncio.sleep(0.5)
+                        await send_audio(opening_greeting)
+
+                    asyncio.create_task(_play_intro())
 
                 elif event == "media":
                     media = data.get("media") or {}
