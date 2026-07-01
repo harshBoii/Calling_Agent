@@ -77,6 +77,10 @@ DEFAULT_LLM_MODELS = {
     "sarvam": "sarvam-105b",
 }
 
+# Post-call transcript analysis (webhook) — fixed model, separate from live-call LLM
+ANALYSIS_LLM_PROVIDER = (os.environ.get("ANALYSIS_LLM_PROVIDER") or "claude").strip().lower()
+ANALYSIS_LLM_MODEL = (os.environ.get("ANALYSIS_LLM_MODEL") or "claude-sonnet-5").strip()
+
 # ─── Deepgram ─────────────────────────────────────────────────────────────────
 DEEPGRAM_URL_BASE = (
     "wss://api.deepgram.com/v1/listen"
@@ -218,21 +222,29 @@ def _normalize_previous_chat_context(raw) -> str | None:
 
 
 def build_legacy_system_prompt(ctx: dict, vertical: str) -> str:
+    from agent_config import append_call_end_instructions
     from campaign_vertical import (
         AGENT_MISSION_BY_VERTICAL,
+        build_call_end_instructions,
+        build_close_goal_section,
         vertical_legacy_flow,
         vertical_legacy_goal,
     )
 
     goal = vertical_legacy_goal(vertical, ctx["NAME"], ctx["PERKS_OF_PRODUCT"])
     mission = AGENT_MISSION_BY_VERTICAL.get(vertical, AGENT_MISSION_BY_VERTICAL["SALES"])
-    goal_section = f"## Your Goal\n{goal}\n\n## Campaign objective\n{mission}"
+    goal_section = (
+        f"## Your Goal\n{goal}\n\n"
+        f"## Campaign objective\n{mission}\n\n"
+        f"## Close goal\n{build_close_goal_section(vertical)}"
+    )
     flow_section = vertical_legacy_flow(vertical, ctx["PERKS_OF_PRODUCT"])
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    base = SYSTEM_PROMPT_TEMPLATE.format(
         **ctx,
         GOAL_SECTION=goal_section,
         FLOW_SECTION=flow_section,
     )
+    return append_call_end_instructions(base, vertical)
 
 
 def build_call_config(body: dict | None) -> dict:

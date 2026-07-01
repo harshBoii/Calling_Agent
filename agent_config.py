@@ -11,10 +11,14 @@ from schemas.outbound_call import AgentConfig, ConversationStage, OutboundCallRe
 
 from campaign_vertical import (
     AGENT_MISSION_BY_VERTICAL,
-    AGENT_OMIT_BOOKING,
     AGENT_OMIT_DISCOVERY_QUESTIONS,
+    COLLECTIONS_HANGUP_ATTEMPT_LIMIT,
+    COLLECTIONS_HANGUP_HOLD_LINE,
     build_call_context_lines,
+    build_call_end_instructions,
+    build_close_goal_section,
     normalize_campaign_vertical,
+    vertical_allows_meeting_slots,
 )
 
 # ─── Keyword heuristics for stage routing ─────────────────────────────────────
@@ -120,10 +124,6 @@ _SLOT_ORDINALS = [
 
 HANGUP_MARKER = "<<HANGUP>>"
 
-CALL_END_INSTRUCTIONS = """## Ending the call
-When you are confident the conversation should end — meeting confirmed, clear mutual goodbye, or the lead has no interest after you have already tried handling objections — give a brief polite closing line and append <<HANGUP>> at the very end of your message (after your spoken words).
-Only use <<HANGUP>> when you are ready to end the call. Do not use it mid-conversation."""
-
 _GOODBYE_PHRASES = [
     "goodbye",
     "good bye",
@@ -221,14 +221,44 @@ def parse_agent_reply(reply: str) -> tuple[str, bool]:
     return reply.strip(), False
 
 
-def append_call_end_instructions(prompt: str) -> str:
-    if CALL_END_INSTRUCTIONS.strip() in prompt:
+def append_call_end_instructions(prompt: str, vertical: str | None = None) -> str:
+    instructions = build_call_end_instructions(vertical)
+    if instructions.strip() in prompt:
         return prompt
-    return f"{prompt.rstrip()}\n\n{CALL_END_INSTRUCTIONS}"
+    return f"{prompt.rstrip()}\n\n{instructions}"
+
+
+def apply_collections_hangup_gate(
+    session: "ConversationSession", spoken: str, marker_hangup: bool
+) -> tuple[str, bool]:
+    """Collections: require 3 close attempts before allowing <<HANGUP>>."""
+    if session.campaign_vertical() != "COLLECTIONS":
+        return spoken, marker_hangup
+
+    low = spoken.lower()
+    trying_to_end = marker_hangup or any(p in low for p in _GOODBYE_PHRASES)
+    if not trying_to_end:
+        return spoken, False
+
+    session.collections_hangup_attempts += 1
+    spoken = spoken.replace(HANGUP_MARKER, "").strip()
+
+    if session.collections_hangup_attempts >= COLLECTIONS_HANGUP_ATTEMPT_LIMIT:
+        return spoken, True
+
+    hold = COLLECTIONS_HANGUP_HOLD_LINE
+    if hold.lower() not in low:
+        spoken = f"{spoken} {hold}".strip() if spoken else hold
+    return spoken, False
 
 
 def evaluate_hangup_confidence(session: "ConversationSession", spoken: str, marker_hangup: bool) -> tuple[bool, str | None]:
     """Decide if the agent should hang up after this reply."""
+    if session.campaign_vertical() == "COLLECTIONS":
+        if marker_hangup:
+            return True, "agent_confident_end"
+        return False, None
+
     if marker_hangup:
         return True, "agent_confident_end"
 
@@ -323,7 +353,7 @@ def _build_personalization_hints(cfg: dict, ac: dict) -> list[str]:
         if preset == "industry" and info:
             hints.append(f"Lead context may imply industry signals: {info}")
         elif preset == "pain_point" and info:
-            hints.append(f"Look for pain points in: {info}")
+            hints.append(f"Look for Details in: {info}")
         elif preset == "prior_touch_history" and prev:
             hints.append(f"Prior touch history: {prev}")
     return hints
@@ -363,6 +393,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
     parts.append(
         _section("Campaign objective", [AGENT_MISSION_BY_VERTICAL[vertical]])
     )
+    parts.append(f"## Close goal\n{build_close_goal_section(vertical)}")
 
     if personality:
         parts.append(
@@ -451,9 +482,9 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
                 f"After {thresh} failed objection handles, use soft close and end call."
             )
     parts.append(_section("Behavioral guardrails (strict)", guard_lines))
-    parts.append(CALL_END_INSTRUCTIONS)
+    parts.append(build_call_end_instructions(vertical))
 
-    if booking.get("closeTrigger") and vertical not in AGENT_OMIT_BOOKING:
+    if booking.get("closeTrigger") and vertical_allows_meeting_slots(vertical):
         parts.append(
             _section(
                 "Booking trigger",
@@ -544,6 +575,13 @@ class ConversationSession:
         self.booking_confirmed = False
         self.end_call_reason: str | None = None
         self.no_interest_streak = 0
+        self.collections_hangup_attempts = 0
+
+    def campaign_vertical(self) -> str:
+        return normalize_campaign_vertical(self.call_cfg.get("campaign_type"))
+
+    def allows_meeting_slots(self) -> bool:
+        return vertical_allows_meeting_slots(self.campaign_vertical())
 
     @property
     def current_stage_key(self) -> str:
@@ -563,6 +601,8 @@ class ConversationSession:
 
     def ensure_offered_slots(self) -> None:
         """Populate offered slots from request payload or keep existing."""
+        if not self.allows_meeting_slots():
+            return
         if self.offered_slots:
             return
         count = self._slots_to_offer_count()
@@ -657,7 +697,7 @@ class ConversationSession:
 
         remaining = max(0, stage.get("maxTurns", 2) - self.stage_turn_count)
         slot_hint = ""
-        if self.current_stage_key == "slot_suggestion":
+        if self.allows_meeting_slots() and self.current_stage_key == "slot_suggestion":
             count = self._slots_to_offer_count()
             if self.available_slots:
                 compact = format_slots_compact(self.available_slots)
@@ -731,6 +771,8 @@ Focus ONLY on this stage goal for your next reply."""
         return None
 
     def _jump_to_stage(self, key: str) -> bool:
+        if key in ("slot_suggestion", "confirmation") and not self.allows_meeting_slots():
+            return False
         for i, stage in enumerate(self.stages):
             if stage.get("key") == key:
                 old = self.current_stage_key
@@ -741,11 +783,19 @@ Focus ONLY on this stage goal for your next reply."""
         return False
 
     def _advance_sequential(self) -> None:
-        if self.stage_index < len(self.stages) - 1:
-            old = self.current_stage_key
+        if self.stage_index >= len(self.stages) - 1:
+            return
+        old = self.current_stage_key
+        self.stage_index += 1
+        self.stage_turn_count = 0
+        while (
+            not self.allows_meeting_slots()
+            and self.current_stage_key in ("slot_suggestion", "confirmation")
+            and self.stage_index < len(self.stages) - 1
+        ):
             self.stage_index += 1
             self.stage_turn_count = 0
-            print(f"[STAGE] {old} → {self.current_stage_key}", flush=True)
+        print(f"[STAGE] {old} → {self.current_stage_key}", flush=True)
 
     def advance_stage(self, user_text: str) -> None:
         if not self.stages:
@@ -756,6 +806,8 @@ Focus ONLY on this stage goal for your next reply."""
             return
 
         for target in stage.get("skipToTargets") or []:
+            if target in ("slot_suggestion", "confirmation") and not self.allows_meeting_slots():
+                continue
             keywords = _SKIP_KEYWORDS.get(target, [])
             if keywords and _text_matches_any(user_text, keywords):
                 if self._jump_to_stage(target):
@@ -763,8 +815,10 @@ Focus ONLY on this stage goal for your next reply."""
 
         booking = (self.call_cfg.get("agent_config") or {}).get("bookingClose") or {}
         close_trigger = (booking.get("closeTrigger") or "").lower()
-        if close_trigger and any(
-            word in user_text.lower() for word in close_trigger.split() if len(word) > 3
+        if (
+            self.allows_meeting_slots()
+            and close_trigger
+            and any(word in user_text.lower() for word in close_trigger.split() if len(word) > 3)
         ):
             if self._jump_to_stage("slot_suggestion"):
                 return
@@ -828,6 +882,7 @@ Focus ONLY on this stage goal for your next reply."""
             "objectionAttempts": self.objection_attempts,
             "bookingConfirmed": self.booking_confirmed,
             "endCallReason": self.end_call_reason,
+            "collectionsHangupAttempts": self.collections_hangup_attempts,
         }
 
 

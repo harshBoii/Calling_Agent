@@ -13,6 +13,7 @@ from sarvamai import AsyncSarvamAI
 from agent_config import (
     ConversationSession,
     append_call_end_instructions,
+    apply_collections_hangup_gate,
     evaluate_hangup_confidence,
     parse_agent_reply,
 )
@@ -117,7 +118,9 @@ async def run_media_stream(
     await websocket.accept()
     print(f"[{call_sid}] Telnyx WebSocket connected", flush=True)
 
-    system_prompt = append_call_end_instructions(call_cfg["system_prompt"])
+    system_prompt = append_call_end_instructions(
+        call_cfg["system_prompt"], call_cfg.get("campaign_type")
+    )
     opening_greeting = call_cfg["opening_greeting"]
     base_system_prompt = system_prompt
     session: ConversationSession | None = None
@@ -183,6 +186,10 @@ async def run_media_stream(
 
     async def _speak_and_maybe_hangup(text: str, hangup_reason: str | None = None) -> None:
         spoken, marker_hangup = parse_agent_reply(text)
+        if session:
+            spoken, marker_hangup = apply_collections_hangup_gate(
+                session, spoken, marker_hangup
+            )
         should_hangup = bool(hangup_reason)
         reason = hangup_reason
 
@@ -252,18 +259,20 @@ async def run_media_stream(
                 await _speak_and_maybe_hangup(soft_line, "no_interest")
                 return
 
-            session.ensure_offered_slots()
+            if session.allows_meeting_slots():
+                session.ensure_offered_slots()
 
-            if session.current_stage_key == "slot_suggestion":
-                session.detect_slot_selection(user_text)
-            elif session.current_stage_key == "confirmation":
-                session.detect_slot_selection(user_text)
-                session.maybe_confirm_booking(user_text)
+                if session.current_stage_key == "slot_suggestion":
+                    session.detect_slot_selection(user_text)
+                elif session.current_stage_key == "confirmation":
+                    session.detect_slot_selection(user_text)
+                    session.maybe_confirm_booking(user_text)
 
             session.advance_stage(user_text)
 
             if (
-                session.current_stage_key == "slot_suggestion"
+                session.allows_meeting_slots()
+                and session.current_stage_key == "slot_suggestion"
                 and not session.offered_slots
             ):
                 booking = (call_cfg.get("agent_config") or {}).get("bookingClose") or {}

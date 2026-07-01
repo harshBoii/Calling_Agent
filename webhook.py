@@ -11,9 +11,9 @@ import uuid
 import httpx
 
 from config import (
+    ANALYSIS_LLM_MODEL,
+    ANALYSIS_LLM_PROVIDER,
     NEXT_JS_SERVICE_URL,
-    DEFAULT_LLM_MODELS,
-    DEFAULT_LLM_PROVIDER,
     WEBHOOK_CALL,
     WEBHOOK_EMAIL,
     WEBHOOK_SECRET,
@@ -47,10 +47,9 @@ async def analyze_transcript(turns: list[dict], cfg: dict, *, call_ended_at: dt.
     # "tomorrow at 3" into an absolute ISO-8601 UTC timestamp when possible.
     meta = f"Call ended at (UTC): {ended_at_iso}\n" if ended_at_iso else ""
     user_msg = [{"role": "user", "content": f"{meta}\nTranscript:\n{transcript_text}".strip()}]
-    provider = (cfg.get("llm_provider") or DEFAULT_LLM_PROVIDER).lower()
-    model = cfg.get("llm_model") or DEFAULT_LLM_MODELS.get(
-        provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
-    )
+    provider = ANALYSIS_LLM_PROVIDER
+    model = ANALYSIS_LLM_MODEL
+    print(f"[WEBHOOK] analyze using {provider}/{model}", flush=True)
 
     vertical = cfg.get("campaign_type") or "SALES"
     system_prompt = get_analysis_prompt(vertical)

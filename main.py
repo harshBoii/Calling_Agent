@@ -355,18 +355,34 @@ async def _direct_outbound_call(cfg: dict, cfg_token: str, to_number: str) -> di
 async def make_outbound_call(request: Request):
     _ensure_service_ready()
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as e:
+        print(f"[OUTBOUND] 400 Invalid JSON body: {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}") from e
+
     try:
         req = OutboundCallRequest.model_validate(body)
     except ValidationError as e:
-        raise HTTPException(status_code=400, detail=e.errors()) from e
+        errors = e.errors()
+        print(f"[OUTBOUND] 400 ValidationError: {json.dumps(errors)}", flush=True)
+        if isinstance(body, dict):
+            print(
+                f"[OUTBOUND] 400 body snapshot: "
+                f"campaign_type={body.get('campaign_type')!r} "
+                f"campaignType={body.get('campaignType')!r} "
+                f"to={body.get('to')!r}",
+                flush=True,
+            )
+        raise HTTPException(status_code=400, detail=errors) from e
 
     to_number = _normalize_to_e164(str(req.to))
     if not _E164_RE.match(to_number):
-        raise HTTPException(
-            status_code=400,
-            detail=f"'to' must be in +E164 format, e.g. +918102244713 (got {req.to!r})",
+        detail = (
+            f"'to' must be in +E164 format, e.g. +918102244713 (got {req.to!r})"
         )
+        print(f"[OUTBOUND] 400 {detail} (normalized={to_number!r})", flush=True)
+        raise HTTPException(status_code=400, detail=detail)
 
     call_type = req.call_type
     cfg_body = req.to_cfg_body()

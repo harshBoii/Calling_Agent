@@ -67,10 +67,81 @@ AGENT_MISSION_BY_VERTICAL: dict[str, str] = {
     ),
 }
 
+# Primary close outcome per vertical (what success looks like)
+VERTICAL_CLOSE_GOAL: dict[str, str] = {
+    "SALES": "MEET BOOKING",
+    "COLLECTIONS": "payment link",
+    "REMINDER": "booked_meet_link",
+    "SURVEY": "A Doc Of our Survey Conversation",
+    "RENEWAL": "payment link",
+}
+
+COLLECTIONS_HANGUP_ATTEMPT_LIMIT = 3
+COLLECTIONS_HANGUP_HOLD_LINE = (
+    "I will need to cut this call soon, but we must clarify a few things first."
+)
+
+# Only SALES may offer calendar meeting slots
+VERTICALS_WITH_MEETING_SLOTS: frozenset[str] = frozenset({"SALES"})
+
 # Sections to skip in build_base_system_prompt (see agent_config.py)
-AGENT_OMIT_BOOKING: frozenset[str] = frozenset({"REMINDER", "SURVEY"})
+AGENT_OMIT_BOOKING: frozenset[str] = frozenset(
+    {"COLLECTIONS", "REMINDER", "SURVEY", "RENEWAL"}
+)
 AGENT_OMIT_DISCOVERY_QUESTIONS: frozenset[str] = frozenset({"SURVEY"})
 AGENT_COLLECTIONS_CONTEXT: frozenset[str] = frozenset({"COLLECTIONS"})
+
+
+def get_vertical_close_goal(vertical: str | None) -> str:
+    """Return the primary close goal label for a campaign vertical."""
+    key = normalize_campaign_vertical(vertical)
+    return VERTICAL_CLOSE_GOAL.get(key, VERTICAL_CLOSE_GOAL["SALES"])
+
+
+def vertical_allows_meeting_slots(vertical: str | None) -> bool:
+    """Only Sales campaigns may offer calendar meeting slots."""
+    return normalize_campaign_vertical(vertical) in VERTICALS_WITH_MEETING_SLOTS
+
+
+def build_call_end_instructions(vertical: str | None) -> str:
+    """Vertical-specific call ending rules for the agent system prompt."""
+    key = normalize_campaign_vertical(vertical)
+    goal = get_vertical_close_goal(key)
+
+    if key == "COLLECTIONS":
+        limit = COLLECTIONS_HANGUP_ATTEMPT_LIMIT
+        return f"""## Ending the call
+Primary close goal: {goal} — confirm or send payment link. Never offer meeting slots.
+Before ending, clarify outstanding balance, promise-to-pay (amount + date), or the next step.
+You may attempt to close the call at most {limit} times. On attempts 1–{limit - 1}, be strict: say you will cut the call soon but must clarify a few things first — do NOT append {HANGUP_MARKER}.
+Only on attempt {limit}, after blockers are addressed, give a brief polite closing line and append {HANGUP_MARKER} at the very end.
+Never use {HANGUP_MARKER} while payment details are still unclear."""
+
+    if key == "SALES":
+        return f"""## Ending the call
+Primary close goal: {goal}.
+When meeting is confirmed, clear mutual goodbye, or no interest after objection handling — give a brief polite closing line and append {HANGUP_MARKER} at the very end (after your spoken words).
+Only use {HANGUP_MARKER} when you are ready to end the call. Do not use it mid-conversation."""
+
+    return f"""## Ending the call
+Primary close goal: {goal}.
+Do NOT offer calendar meeting slots or schedule sales demos.
+When the call objective is met or the contact clearly declines — give a brief polite closing line and append {HANGUP_MARKER} at the very end.
+Only use {HANGUP_MARKER} when you are ready to end the call."""
+
+
+# Marker used in build_call_end_instructions (imported by agent_config at runtime)
+HANGUP_MARKER = "<<HANGUP>>"
+
+
+def build_close_goal_section(vertical: str | None) -> str:
+    """Prompt section describing what a successful close looks like."""
+    key = normalize_campaign_vertical(vertical)
+    goal = get_vertical_close_goal(key)
+    lines = [f"Success = {goal}"]
+    if not vertical_allows_meeting_slots(key):
+        lines.append("Do NOT offer meeting slots or calendar booking times.")
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def build_call_context_lines(cfg: dict, vertical: str) -> list[str]:

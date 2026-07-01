@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from agent_config import format_slots_compact
+from campaign_vertical import normalize_campaign_vertical, vertical_allows_meeting_slots
 
 if TYPE_CHECKING:
     from agent_config import ConversationSession
@@ -305,6 +306,9 @@ def build_intent_context(
 
     sections: dict[str, str] = {}
     perks = (call_cfg.get("perks_of_product") or "").strip()
+    allows_slots = vertical_allows_meeting_slots(
+        normalize_campaign_vertical(call_cfg.get("campaign_type"))
+    )
     objection_library = (
         (call_cfg.get("agent_config") or {}).get("objectionHandling") or {}
     ).get("objectionLibrary") or {}
@@ -313,7 +317,7 @@ def build_intent_context(
         if intent in _SKIP_INJECTION_INTENTS:
             continue
 
-        if intent in ("booking_intent", "confirmation_signal") and session:
+        if intent in ("booking_intent", "confirmation_signal") and session and allows_slots:
             compact = format_slots_compact(session.available_slots)
             if compact:
                 lines = [compact]
@@ -342,7 +346,12 @@ def build_intent_context(
 
         elif intent == "positive_signal" and session:
             stage_key = session.current_stage_key
-            if stage_key in ("greeting", "discovery"):
+            if not allows_slots:
+                sections["Positive signal"] = (
+                    "Lead is showing interest — acknowledge and continue "
+                    "toward the call objective."
+                )
+            elif stage_key in ("greeting", "discovery"):
                 sections["Positive signal"] = (
                     "Lead is showing interest — briefly acknowledge and "
                     "move toward discovery or booking."
