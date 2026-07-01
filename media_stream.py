@@ -23,8 +23,11 @@ from config import (
     CALL_RECORDING_DISCLOSURE,
     DEEPGRAM_API_KEY,
     ELEVENLABS_VOICE_ID,
+    MAX_CONSECUTIVE_SILENCE_NUDGES,
     MIN_WORDS_TO_RESPOND,
     SARVAM_API_KEY,
+    SILENCE_HANGUP_LINE,
+    SILENCE_NUDGE_SEC,
     deepgram_ws_url,
     to_sarvam_lang,
 )
@@ -164,6 +167,88 @@ async def run_media_stream(
     connected = False
     turns: list[dict] = []
     first_user_turn = True
+    silence_nudge_count = 0
+    silence_timer_task: asyncio.Task | None = None
+    silence_handling = False
+
+    def _silence_watch_active() -> bool:
+        if hangup_requested:
+            return False
+        if session and session.call_should_end:
+            return False
+        if not connected:
+            return False
+        return True
+
+    async def _cancel_silence_timer() -> None:
+        nonlocal silence_timer_task
+        if silence_timer_task and not silence_timer_task.done():
+            silence_timer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await silence_timer_task
+        silence_timer_task = None
+
+    async def _arm_silence_timer() -> None:
+        nonlocal silence_timer_task
+        if not _silence_watch_active() or agent_speaking or silence_handling:
+            return
+        await _cancel_silence_timer()
+
+        async def _watch() -> None:
+            try:
+                await asyncio.sleep(SILENCE_NUDGE_SEC)
+                await _on_silence_timeout()
+            except asyncio.CancelledError:
+                pass
+
+        silence_timer_task = asyncio.create_task(_watch())
+
+    async def _handle_silence_nudge() -> None:
+        nonlocal silence_handling
+        silence_handling = True
+        try:
+            silence_hint = (
+                "\n\n## Silence\n"
+                "The user has been silent for several seconds. In one short sentence, "
+                "check they are still on the line and continue the conversation toward "
+                "the current goal."
+            )
+            if session:
+                turn_prompt = session.build_turn_prompt(base_system_prompt) + silence_hint
+                agent_reply = await ask_llm(
+                    conversation_history, turn_prompt, llm_provider, llm_model
+                )
+                agent_reply = session.enforce_reply(agent_reply)
+                session.stage_turn_count += 1
+                session.sync_to_cfg()
+            else:
+                agent_reply = await ask_llm(
+                    conversation_history,
+                    system_prompt + silence_hint,
+                    llm_provider,
+                    llm_model,
+                )
+            await _speak_and_maybe_hangup(agent_reply)
+        finally:
+            silence_handling = False
+
+    async def _on_silence_timeout() -> None:
+        nonlocal silence_nudge_count
+        if not _silence_watch_active() or agent_speaking or silence_handling:
+            return
+
+        silence_nudge_count += 1
+        print(
+            f"[{call_sid}] 🔇 Silence {SILENCE_NUDGE_SEC}s "
+            f"(nudge {silence_nudge_count}/{MAX_CONSECUTIVE_SILENCE_NUDGES})",
+            flush=True,
+        )
+
+        if silence_nudge_count > MAX_CONSECUTIVE_SILENCE_NUDGES:
+            await _speak_and_maybe_hangup(SILENCE_HANGUP_LINE, "no_response")
+            return
+
+        await _handle_silence_nudge()
 
     def _ts() -> float:
         if started_at is None:
@@ -212,6 +297,7 @@ async def run_media_stream(
         await send_audio(spoken)
 
         if should_hangup and reason:
+            await _cancel_silence_timer()
             await _hangup_call(reason)
 
     async def _check_and_handle_voicemail(text: str) -> bool:
@@ -230,7 +316,10 @@ async def run_media_stream(
         return True
 
     async def _handle_user_turn(user_text: str) -> None:
-        nonlocal agent_speaking, first_user_turn
+        nonlocal agent_speaking, first_user_turn, silence_nudge_count
+
+        await _cancel_silence_timer()
+        silence_nudge_count = 0
 
         if session and session.call_should_end:
             return
@@ -336,6 +425,7 @@ async def run_media_stream(
     # ── TTS sender ─────────────────────────────────────────────────────────────
     async def send_audio(text: str, override_voice_id: str | None = None) -> None:
         nonlocal agent_speaking
+        await _cancel_silence_timer()
         agent_speaking = True
         barge_in_event.clear()  # arm: clear any previous interrupt signal
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
@@ -379,6 +469,8 @@ async def run_media_stream(
 
         agent_speaking = False
         print(f"[{call_sid}] ✅ Sent {chunk_count} chunks (interrupted={barge_in_event.is_set()})", flush=True)
+        if not barge_in_event.is_set():
+            await _arm_silence_timer()
 
     # ── Clear helper ───────────────────────────────────────────────────────────
     async def clear_stream() -> None:
@@ -396,7 +488,7 @@ async def run_media_stream(
         # ── Tunables ──────────────────────────────────────────────────────────
         # Lower RMS threshold = more sensitive to quiet speech.
         # Raise it if you get false interrupts from background noise.
-        barge_in_rms_threshold = 570   # was 700 — lowered for faster response
+        barge_in_rms_threshold = 520   # was 700 — lowered for faster response
         barge_in_cooldown_sec = 0.6    # ignore further triggers for this long
 
         try:
@@ -547,6 +639,8 @@ async def run_media_stream(
                                 barge_in_event.set()
                                 print(f"[{call_sid}] ⚡ STT barge-in (Deepgram)", flush=True)
                                 await clear_stream()
+                            else:
+                                await _cancel_silence_timer()
 
                             if is_final:
                                 label = "FINAL ✅" if speech_final else "FINAL"
@@ -627,11 +721,13 @@ async def run_media_stream(
 
                             # speech_start fires as soon as Sarvam detects voice —
                             # use it as a barge-in signal (faster than waiting for data).
-                            if msg_type == "speech_start" and agent_speaking:
-                                agent_speaking = False
-                                barge_in_event.set()
-                                print(f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)", flush=True)
-                                await clear_stream()
+                            if msg_type == "speech_start":
+                                await _cancel_silence_timer()
+                                if agent_speaking:
+                                    agent_speaking = False
+                                    barge_in_event.set()
+                                    print(f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)", flush=True)
+                                    await clear_stream()
 
                             elif msg_type == "data":
                                 data_obj = getattr(message, "data", None)
@@ -645,6 +741,8 @@ async def run_media_stream(
                                     agent_speaking = False
                                     barge_in_event.set()
                                     await clear_stream()
+                                else:
+                                    await _cancel_silence_timer()
 
                                 print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
 
@@ -672,6 +770,7 @@ async def run_media_stream(
     try:
         await telnyx_task
     finally:
+        await _cancel_silence_timer()
         if duration_timer and not duration_timer.done():
             duration_timer.cancel()
             with contextlib.suppress(asyncio.CancelledError):

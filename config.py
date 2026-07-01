@@ -155,6 +155,12 @@ INFO_ABOUT_LEAD = (
     "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
 )
 MIN_WORDS_TO_RESPOND = 2
+SILENCE_NUDGE_SEC = float(os.environ.get("SILENCE_NUDGE_SEC", "3"))
+MAX_CONSECUTIVE_SILENCE_NUDGES = int(os.environ.get("MAX_CONSECUTIVE_SILENCE_NUDGES", "3"))
+SILENCE_HANGUP_LINE = os.environ.get(
+    "SILENCE_HANGUP_LINE",
+    "It seems like you're caught up — I'll call you back later.",
+)
 
 QUESTIONS_TO_ASK = """
 

@@ -11,30 +11,23 @@ SALES_OUTCOME_RULES = """
 Classify this call transcript into exactly ONE of the following outcomes.
 Use the FIRST rule that matches, in this priority order:
 
-1. DO_NOT_CALL
-   - Prospect explicitly asks to be removed from the call list, says "don't call
-     again," "remove my number," "stop calling," or expresses hostility/anger
-     specifically about being called.
-   - Takes priority over everything else, even if interest was shown earlier
-     in the same call.
-
-2. WRONG_NUMBER
+1. WRONG_NUMBER
    - Person confirms they are not the intended lead (different person, wrong
      company, "no one here by that name," reassigned number).
    - Only use if explicitly confirmed — do not infer from silence or confusion.
 
-3. MEET_REQUESTED
+2. MEET_REQUESTED
    - Prospect agrees to a specific next step with a time/date component:
      demo, meeting, callback at a SPECIFIC time ("call me tomorrow at 3"),
      or agrees to a calendar link / confirms a booking.
    - Must be an explicit commitment, not just "maybe send info."
 
-4. CALLBACK
+3. CALLBACK
    - Prospect asks to be called back but WITHOUT a specific time commitment
      ("call me later," "I'm busy right now," "try me next week" without a date).
    - Also use if they ask to speak to someone else at the company later.
 
-5. INTERESTED
+4. INTERESTED
    - Prospect engages positively: asks about pricing/features, asks clarifying
      questions about the product, says "sounds interesting," "tell me more,"
      or agrees to receive follow-up info (email/WhatsApp) without a firm
@@ -42,22 +35,22 @@ Use the FIRST rule that matches, in this priority order:
    - Distinguish from CALLBACK: INTERESTED = engaged in THIS call.
      CALLBACK = wants to engage LATER instead of now.
 
-6. NOT_INTERESTED
+5. NOT_INTERESTED
    - Prospect explicitly declines: "not interested," "we don't need this,"
-     "already have a solution," "no thanks" — WITHOUT hostility or an
-     explicit do-not-call request.
-   - Polite decline only. If hostile/repeated demand to stop → DO_NOT_CALL instead.
+     "already have a solution," "no thanks," asks not to be called again,
+     or expresses hostility about the call — even if phrased aggressively.
+   - Do NOT use a separate do-not-call outcome; use NOT_INTERESTED.
 
-7. VOICEMAIL
+6. VOICEMAIL
    - Call reached voicemail/answering machine (with or without message left).
    - Detected via call metadata (Telnyx answering_machine_detection) or
      transcript pattern (automated greeting, beep, no live turn-taking).
 
-8. NO_ANSWER
+7. NO_ANSWER
    - Call rang out / not picked up. No transcript exists, or transcript is
      empty/near-empty with no human turn.
 
-9. UNKNOWN
+8. UNKNOWN
    - Call connected but transcript is unintelligible, disconnected mid-call
      with no signal either way, wrong language the agent can't parse,
      or genuinely ambiguous (e.g., prospect hung up immediately with no words).
@@ -65,6 +58,7 @@ Use the FIRST rule that matches, in this priority order:
      for effort-avoidance. Only use when no other rule reasonably applies.
 
 IMPORTANT:
+- Never set outcome to DO_NOT_CALL — that value is not allowed.
 - Base classification ONLY on what was explicitly said or clearly evidenced
   in the transcript/metadata. Do not infer tone or sentiment beyond what's stated.
 - If multiple signals conflict (e.g., prospect says "not interested" then later
@@ -79,46 +73,46 @@ OUTCOME_RULES_BY_VERTICAL: dict[str, str] = {
 Classify this call transcript into exactly ONE of the following outcomes.
 Use the FIRST rule that matches, in this priority order:
 
-1. DO_NOT_CALL
-   - Explicit request to stop contact, OR legal representation mentioned
-     ("talk to my lawyer"). Flag for compliance review regardless.
-2. WRONG_NUMBER
+1. WRONG_NUMBER
    - Person confirms they are not the intended account holder.
-3. DISPUTED
-   - Prospect denies owing the debt or disputes the amount.
-4. PAID_IN_FULL
+2. DISPUTED
+   - Prospect denies owing the debt, disputes the amount, or cites legal
+     representation ("talk to my lawyer").
+3. PAID_IN_FULL
    - Confirmed full payment action taken during or resulting from this call.
-5. PARTIAL_PAYMENT_MADE
+4. PARTIAL_PAYMENT_MADE
    - Confirmed partial payment action taken during or resulting from this call.
-6. PROMISE_TO_PAY
+5. PROMISE_TO_PAY
    - Commits to a SPECIFIC amount AND date. Vague "I'll sort it out" does
      not qualify — use CALLBACK_REQUESTED instead.
-7. HARDSHIP_CLAIMED
+6. HARDSHIP_CLAIMED
    - Cites inability to pay (job loss, medical, etc.).
-8. CALLBACK_REQUESTED
-   - Wants to discuss further, no firm commitment yet.
-9. REFUSED_TO_PAY
+7. CALLBACK_REQUESTED
+   - Wants to discuss further, no firm commitment yet, or asks to stop
+     contact / be called later instead of resolving now.
+8. REFUSED_TO_PAY
    - Acknowledges debt, explicitly declines, no hardship/dispute raised.
-10. VOICEMAIL
-11. NO_ANSWER
-12. UNKNOWN
+9. VOICEMAIL
+10. NO_ANSWER
+11. UNKNOWN
 
-IMPORTANT: Only classify PROMISE_TO_PAY if both amount and date are explicit.
+IMPORTANT: Never set outcome to DO_NOT_CALL — that value is not allowed.
+Only classify PROMISE_TO_PAY if both amount and date are explicit.
 Use latest signal if conflicting. Set "outcome" to exactly ONE enum value.
 """,
     "REMINDER": """
 Classify this call transcript into exactly ONE of the following outcomes.
 Use the FIRST rule that matches, in this priority order:
 
-1. DO_NOT_CALL
-2. WRONG_NUMBER
-3. CONFIRMED — prospect confirms they will attend/keep the appointment.
-4. RESCHEDULE_REQUESTED — asks to change date/time.
-5. CANCELLED — explicitly cancels.
-6. VOICEMAIL
-7. NO_ANSWER
-8. UNKNOWN
+1. WRONG_NUMBER
+2. CONFIRMED — prospect confirms they will attend/keep the appointment.
+3. RESCHEDULE_REQUESTED — asks to change date/time.
+4. CANCELLED — explicitly cancels or asks not to be contacted again.
+5. VOICEMAIL
+6. NO_ANSWER
+7. UNKNOWN
 
+Never set outcome to DO_NOT_CALL — that value is not allowed.
 Use the latest signal if the person changes their mind mid-call.
 Set "outcome" to exactly ONE enum value.
 """,
@@ -126,60 +120,69 @@ Set "outcome" to exactly ONE enum value.
 Classify this call transcript into exactly ONE of the following outcomes.
 Use the FIRST rule that matches, in this priority order:
 
-1. DO_NOT_CALL
-2. WRONG_NUMBER
-3. RESPONDED_POSITIVE — clearly favorable feedback/rating.
-4. RESPONDED_NEUTRAL — mixed or lukewarm feedback.
-5. RESPONDED_NEGATIVE — clearly unfavorable feedback/rating.
-6. DECLINED_SURVEY — refuses to answer but doesn't request DNC.
-7. VOICEMAIL
-8. NO_ANSWER
-9. UNKNOWN
+1. WRONG_NUMBER
+2. RESPONDED_POSITIVE — clearly favorable feedback/rating.
+3. RESPONDED_NEUTRAL — mixed or lukewarm feedback.
+4. RESPONDED_NEGATIVE — clearly unfavorable feedback/rating.
+5. DECLINED_SURVEY — refuses to answer, asks to stop contact, or ends early.
+6. VOICEMAIL
+7. NO_ANSWER
+8. UNKNOWN
 
+Never set outcome to DO_NOT_CALL — that value is not allowed.
 Set "outcome" to exactly ONE enum value.
 """,
     "RENEWAL": """
 Classify this call transcript into exactly ONE of the following outcomes.
 Use the FIRST rule that matches, in this priority order:
 
-1. DO_NOT_CALL
-2. WRONG_NUMBER
-3. RENEWED — confirms renewal during the call.
-4. DECLINED_RENEWAL — explicitly declines to renew.
-5. DOWNGRADE_REQUESTED — wants to renew at a lower tier.
-6. NEEDS_DISCOUNT_APPROVAL — will renew but is negotiating price/terms.
-7. CALLBACK — wants to discuss later, no decision made.
-8. VOICEMAIL
-9. NO_ANSWER
-10. UNKNOWN
+1. WRONG_NUMBER
+2. RENEWED — confirms renewal during the call.
+3. DECLINED_RENEWAL — explicitly declines to renew or asks not to be contacted.
+4. DOWNGRADE_REQUESTED — wants to renew at a lower tier.
+5. NEEDS_DISCOUNT_APPROVAL — will renew but is negotiating price/terms.
+6. CALLBACK — wants to discuss later, no decision made.
+7. VOICEMAIL
+8. NO_ANSWER
+9. UNKNOWN
 
+Never set outcome to DO_NOT_CALL — that value is not allowed.
 Set "outcome" to exactly ONE enum value.
 """,
 }
 
 OUTCOME_VALUES_BY_VERTICAL: dict[str, list[str]] = {
     "SALES": [
-        "DO_NOT_CALL", "WRONG_NUMBER", "MEET_REQUESTED", "CALLBACK", "INTERESTED",
+        "WRONG_NUMBER", "MEET_REQUESTED", "CALLBACK", "INTERESTED",
         "NOT_INTERESTED", "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
     "COLLECTIONS": [
-        "DO_NOT_CALL", "WRONG_NUMBER", "DISPUTED", "PAID_IN_FULL",
+        "WRONG_NUMBER", "DISPUTED", "PAID_IN_FULL",
         "PARTIAL_PAYMENT_MADE", "PROMISE_TO_PAY", "HARDSHIP_CLAIMED",
         "CALLBACK_REQUESTED", "REFUSED_TO_PAY", "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
     "REMINDER": [
-        "DO_NOT_CALL", "WRONG_NUMBER", "CONFIRMED", "RESCHEDULE_REQUESTED",
+        "WRONG_NUMBER", "CONFIRMED", "RESCHEDULE_REQUESTED",
         "CANCELLED", "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
     "SURVEY": [
-        "DO_NOT_CALL", "WRONG_NUMBER", "RESPONDED_POSITIVE", "RESPONDED_NEUTRAL",
+        "WRONG_NUMBER", "RESPONDED_POSITIVE", "RESPONDED_NEUTRAL",
         "RESPONDED_NEGATIVE", "DECLINED_SURVEY", "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
     "RENEWAL": [
-        "DO_NOT_CALL", "WRONG_NUMBER", "RENEWED", "DECLINED_RENEWAL",
+        "WRONG_NUMBER", "RENEWED", "DECLINED_RENEWAL",
         "DOWNGRADE_REQUESTED", "NEEDS_DISCOUNT_APPROVAL", "CALLBACK",
         "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
+}
+
+# If the model still returns DO_NOT_CALL, remap to the closest allowed outcome.
+_DNC_OUTCOME_FALLBACK: dict[str, str] = {
+    "SALES": "NOT_INTERESTED",
+    "COLLECTIONS": "CALLBACK_REQUESTED",
+    "REMINDER": "CANCELLED",
+    "SURVEY": "DECLINED_SURVEY",
+    "RENEWAL": "DECLINED_RENEWAL",
 }
 
 _ANALYST_LABEL: dict[str, str] = {
@@ -261,8 +264,16 @@ def get_analysis_prompt(vertical: str | None) -> str:
 def validate_outcome(vertical: str | None, outcome: str | None) -> str:
     key = normalize_campaign_vertical(vertical)
     allowed = OUTCOME_VALUES_BY_VERTICAL[key]
-    if outcome and str(outcome).strip().upper() in allowed:
-        return str(outcome).strip().upper()
+    normalized = str(outcome).strip().upper() if outcome else ""
+    if normalized == "DO_NOT_CALL":
+        fallback = _DNC_OUTCOME_FALLBACK.get(key, "UNKNOWN")
+        print(
+            f"[ANALYSIS] Remapped DO_NOT_CALL → {fallback} for vertical {key}",
+            flush=True,
+        )
+        return fallback
+    if normalized in allowed:
+        return normalized
     if outcome:
         print(
             f"[ANALYSIS] Invalid outcome {outcome!r} for vertical {key}; using UNKNOWN",
