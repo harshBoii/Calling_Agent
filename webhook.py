@@ -23,6 +23,73 @@ from config import (
 from llm import ask_llm_for_analysis
 
 
+CALL_OUTCOME_RULES = """
+Classify this call transcript into exactly ONE of the following outcomes.
+Use the FIRST rule that matches, in this priority order:
+
+1. DO_NOT_CALL
+   - Prospect explicitly asks to be removed from the call list, says "don't call
+     again," "remove my number," "stop calling," or expresses hostility/anger
+     specifically about being called.
+   - Takes priority over everything else, even if interest was shown earlier
+     in the same call.
+
+2. WRONG_NUMBER
+   - Person confirms they are not the intended lead (different person, wrong
+     company, "no one here by that name," reassigned number).
+   - Only use if explicitly confirmed — do not infer from silence or confusion.
+
+3. MEET_REQUESTED
+   - Prospect agrees to a specific next step with a time/date component:
+     demo, meeting, callback at a SPECIFIC time ("call me tomorrow at 3"),
+     or agrees to a calendar link / confirms a booking.
+   - Must be an explicit commitment, not just "maybe send info."
+
+4. CALLBACK
+   - Prospect asks to be called back but WITHOUT a specific time commitment
+     ("call me later," "I'm busy right now," "try me next week" without a date).
+   - Also use if they ask to speak to someone else at the company later.
+
+5. INTERESTED
+   - Prospect engages positively: asks about pricing/features, asks clarifying
+     questions about the product, says "sounds interesting," "tell me more,"
+     or agrees to receive follow-up info (email/WhatsApp) without a firm
+     meeting commitment.
+   - Distinguish from CALLBACK: INTERESTED = engaged in THIS call.
+     CALLBACK = wants to engage LATER instead of now.
+
+6. NOT_INTERESTED
+   - Prospect explicitly declines: "not interested," "we don't need this,"
+     "already have a solution," "no thanks" — WITHOUT hostility or an
+     explicit do-not-call request.
+   - Polite decline only. If hostile/repeated demand to stop → DO_NOT_CALL instead.
+
+7. VOICEMAIL
+   - Call reached voicemail/answering machine (with or without message left).
+   - Detected via call metadata (Telnyx answering_machine_detection) or
+     transcript pattern (automated greeting, beep, no live turn-taking).
+
+8. NO_ANSWER
+   - Call rang out / not picked up. No transcript exists, or transcript is
+     empty/near-empty with no human turn.
+
+9. UNKNOWN
+   - Call connected but transcript is unintelligible, disconnected mid-call
+     with no signal either way, wrong language the agent can't parse,
+     or genuinely ambiguous (e.g., prospect hung up immediately with no words).
+   - Use sparingly — this should be a small % of calls, not a dumping ground
+     for effort-avoidance. Only use when no other rule reasonably applies.
+
+IMPORTANT:
+- Base classification ONLY on what was explicitly said or clearly evidenced
+  in the transcript/metadata. Do not infer tone or sentiment beyond what's stated.
+- If multiple signals conflict (e.g., prospect says "not interested" then later
+  asks "actually, what's the price?"), use the LATEST signal in the conversation,
+  since that reflects their final position.
+- Set the "outcome" field to exactly ONE enum value from the list above.
+"""
+
+
 _ANALYSIS_SYSTEM_PROMPT = (
     "You are a sales-call analyst. Analyze the transcript of a phone call "
     "between an AI sales agent and a human lead, and produce a structured "
@@ -30,7 +97,8 @@ _ANALYSIS_SYSTEM_PROMPT = (
     "Return STRICT JSON (no prose, no markdown fences) with EXACTLY these keys:\n"
     '  - "summary" (string): 1-3 sentence summary of the call.\n'
     '  - "outcome" (string): one of '
-    "INTERESTED, NOT_INTERESTED, MEET_REQUESTED, VOICEMAIL, NO_ANSWER, DO_NOT_CALL,WRONG_NUMBER, UNKNOWN.\n"
+    "DO_NOT_CALL, WRONG_NUMBER, MEET_REQUESTED, CALLBACK, INTERESTED, "
+    "NOT_INTERESTED, VOICEMAIL, NO_ANSWER, UNKNOWN.\n"
     '  - "followUpAgreed" (boolean): true if the lead explicitly agreed to a follow-up call or scheduled callback; otherwise false.\n'
     '  - "followUpAt" (string|null): the scheduled follow-up time as an ISO-8601 UTC timestamp (e.g. "2026-04-23T15:30:00Z") if the time can be determined; otherwise null.\n'
     '  - "sentiment" (string): one of POSITIVE, NEUTRAL, NEGATIVE.\n'
@@ -39,7 +107,9 @@ _ANALYSIS_SYSTEM_PROMPT = (
     '  - "suggestedNextMove" (string): concrete next action the sales team should take.\n\n'
     "Rules: respond with a single JSON object only. Put all string values on one line; "
     "escape any double quote inside a string as \\\". Do not use markdown. "
-    "If uncertain about followUpAt, use null."
+    "If uncertain about followUpAt, use null.\n\n"
+    "Outcome classification (apply to the \"outcome\" field):\n"
+    f"{CALL_OUTCOME_RULES}"
 )
 
 
