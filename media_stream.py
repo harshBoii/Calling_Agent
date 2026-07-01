@@ -762,7 +762,7 @@ async def run_media_stream(
                             if speech_final and transcript_buffer:
                                 full_turn = " ".join(transcript_buffer)
                                 transcript_buffer.clear()
-                                if len(full_turn.split()) < MIN_WORDS_TO_RESPOND:
+                                if len(full_turn.split()) <= MIN_WORDS_TO_RESPOND:
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
                                     continue
                                 if session and session.call_should_end:
@@ -857,7 +857,7 @@ async def run_media_stream(
 
                                 print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
 
-                                if len(transcript.split()) < MIN_WORDS_TO_RESPOND:
+                                if len(transcript.split()) <= MIN_WORDS_TO_RESPOND:
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{transcript}'", flush=True)
                                     continue
 

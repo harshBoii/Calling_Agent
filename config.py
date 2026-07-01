@@ -154,8 +154,8 @@ PERKS_OF_PRODUCT = "10% off on the first month"
 INFO_ABOUT_LEAD = (
     "The Lead is a poor guy with a low income and is looking for a cheap way to grow his business."
 )
-MIN_WORDS_TO_RESPOND = 2
-SILENCE_NUDGE_SEC = float(os.environ.get("SILENCE_NUDGE_SEC", "3"))
+MIN_WORDS_TO_RESPOND = 1
+SILENCE_NUDGE_SEC = float(os.environ.get("SILENCE_NUDGE_SEC", "10"))
 MAX_CONSECUTIVE_SILENCE_NUDGES = int(os.environ.get("MAX_CONSECUTIVE_SILENCE_NUDGES", "3"))
 SILENCE_HANGUP_LINE = os.environ.get(
     "SILENCE_HANGUP_LINE",
