@@ -46,6 +46,38 @@ def _claude_temperature_deprecated(model: str) -> bool:
     return "sonnet-5" in m or m.startswith("claude-opus-4-")
 
 
+def _claude_adaptive_thinking_default(model: str) -> bool:
+    """Models that return thinking blocks before text (adaptive thinking on by default)."""
+    m = (model or "").lower()
+    return (
+        "sonnet-5" in m
+        or "opus-4-6" in m
+        or "opus-4-7" in m
+        or "opus-4-8" in m
+        or "fable-5" in m
+        or "mythos" in m
+    )
+
+
+def _claude_response_text(response) -> str:
+    """
+    Extract user-facing text from a Claude Messages API response.
+
+    Extended/adaptive thinking models return thinking blocks before text blocks;
+    never assume content[0] is TextBlock.
+    """
+    parts: list[str] = []
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+    if not parts:
+        block_types = [getattr(b, "type", type(b).__name__) for b in response.content]
+        raise ValueError(f"Claude response contained no text blocks (got {block_types})")
+    return "\n".join(parts).strip()
+
+
 async def _claude_messages_create(**kwargs):
     """Create Claude message; omit temperature when the model rejects it."""
     if _claude_temperature_deprecated(kwargs.get("model", "")):
@@ -179,7 +211,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
             max_tokens=4000,
             temperature=0.9,
         )
-        return resp.content[0].text.strip()
+        return _claude_response_text(resp)
 
     if p == "gemini" and GEMINI_API_KEY:
         print("[GREETING] Using Gemini", flush=True)
@@ -289,7 +321,7 @@ Return ONLY the questions, one per line. No numbering, no bullets, no extra text
                 max_tokens=500,
                 temperature=0.6,
             )
-            raw = resp.content[0].text.strip()
+            raw = _claude_response_text(resp)
         elif p == "gemini" and GEMINI_API_KEY:
             gemini_model = genai.GenerativeModel(llm_model)
             resp = await asyncio.to_thread(gemini_model.generate_content, prompt)
@@ -372,7 +404,7 @@ async def ask_llm(
                 messages=claude_messages,
                 max_tokens=4000,
             )
-            return response.content[0].text.strip()
+            return _claude_response_text(response)
 
         if provider == "gemini":
             if not GEMINI_API_KEY:
@@ -465,14 +497,18 @@ async def ask_llm_for_analysis(
     if p == "claude":
         if not claude_client:
             raise ValueError("ANTHROPIC_API_KEY not set")
-        response = await _claude_messages_create(
-            model=model,
-            system=system_prompt,
-            messages=conversation_history,
-            max_tokens=_ANALYSIS_MAX_TOKENS,
-            temperature=_ANALYSIS_TEMPERATURE,
-        )
-        return response.content[0].text.strip()
+        claude_kwargs: dict = {
+            "model": model,
+            "system": system_prompt,
+            "messages": conversation_history,
+            "max_tokens": _ANALYSIS_MAX_TOKENS,
+            "temperature": _ANALYSIS_TEMPERATURE,
+        }
+        # Sonnet 5+ use adaptive thinking by default; disable for fast JSON analysis.
+        if _claude_adaptive_thinking_default(model):
+            claude_kwargs["thinking"] = {"type": "disabled"}
+        response = await _claude_messages_create(**claude_kwargs)
+        return _claude_response_text(response)
 
     if p == "gemini":
         if not GEMINI_API_KEY:
