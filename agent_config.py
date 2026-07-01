@@ -17,6 +17,7 @@ from campaign_vertical import (
     build_call_context_lines,
     build_call_end_instructions,
     build_close_goal_section,
+    build_collections_payment_guardrails_section,
     normalize_campaign_vertical,
     vertical_allows_meeting_slots,
     vertical_uses_sales_objection_hangup,
@@ -416,6 +417,9 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
     parts.append(
         _section("Call context", build_call_context_lines(cfg, vertical))
     )
+
+    if vertical == "COLLECTIONS":
+        parts.append(build_collections_payment_guardrails_section(cfg))
 
     kg_lines = []
     if kg.get("claimWhitelist"):

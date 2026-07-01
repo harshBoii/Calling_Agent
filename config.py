@@ -234,6 +234,7 @@ def build_legacy_system_prompt(ctx: dict, vertical: str) -> str:
         AGENT_MISSION_BY_VERTICAL,
         build_call_end_instructions,
         build_close_goal_section,
+        build_collections_payment_guardrails_section,
         vertical_legacy_flow,
         vertical_legacy_goal,
     )
@@ -245,6 +246,13 @@ def build_legacy_system_prompt(ctx: dict, vertical: str) -> str:
         f"## Campaign objective\n{mission}\n\n"
         f"## Close goal\n{build_close_goal_section(vertical)}"
     )
+    if vertical == "COLLECTIONS":
+        legacy_cfg = {
+            "perks_of_product": ctx.get("PERKS_OF_PRODUCT"),
+            "info_about_lead": ctx.get("INFO_ABOUT_LEAD"),
+            "agent_config": {},
+        }
+        goal_section += f"\n{build_collections_payment_guardrails_section(legacy_cfg)}"
     flow_section = vertical_legacy_flow(vertical, ctx["PERKS_OF_PRODUCT"])
     base = SYSTEM_PROMPT_TEMPLATE.format(
         **ctx,

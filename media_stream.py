@@ -172,6 +172,8 @@ async def run_media_stream(
     silence_timer_task: asyncio.Task | None = None
     silence_handling = False
     greeting_barge_guard_until: dt.datetime | None = None
+    waiting_for_user_since: dt.datetime | None = None
+    _last_silence_log_sec = -1
 
     def _barge_in_allowed() -> bool:
         if greeting_barge_guard_until is None:
@@ -187,24 +189,68 @@ async def run_media_stream(
             return False
         return True
 
-    async def _cancel_silence_timer() -> None:
-        nonlocal silence_timer_task
+    def _silence_elapsed_sec() -> float:
+        if waiting_for_user_since is None:
+            return 0.0
+        return (
+            dt.datetime.now(dt.timezone.utc) - waiting_for_user_since
+        ).total_seconds()
+
+    async def _cancel_silence_timer(reason: str = "") -> None:
+        nonlocal silence_timer_task, waiting_for_user_since, _last_silence_log_sec
+        elapsed = _silence_elapsed_sec()
         if silence_timer_task and not silence_timer_task.done():
             silence_timer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await silence_timer_task
         silence_timer_task = None
+        if waiting_for_user_since is not None and elapsed > 0:
+            suffix = f" ({reason})" if reason else ""
+            print(
+                f"[{call_sid}] 🔇 Silence timer cancelled after {elapsed:.1f}s{suffix}",
+                flush=True,
+            )
+        waiting_for_user_since = None
+        _last_silence_log_sec = -1
 
-    async def _arm_silence_timer() -> None:
-        nonlocal silence_timer_task
-        if not _silence_watch_active() or agent_speaking or silence_handling:
+    async def _arm_silence_timer(reason: str = "agent_done") -> None:
+        nonlocal silence_timer_task, waiting_for_user_since, _last_silence_log_sec
+        if not _silence_watch_active():
+            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): inactive", flush=True)
             return
-        await _cancel_silence_timer()
+        if agent_speaking:
+            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): agent speaking", flush=True)
+            return
+        if silence_handling:
+            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): nudge in progress", flush=True)
+            return
+        await _cancel_silence_timer("re-arm")
+        waiting_for_user_since = dt.datetime.now(dt.timezone.utc)
+        _last_silence_log_sec = -1
+        print(
+            f"[{call_sid}] 🔇 Silence watch armed ({reason}) — "
+            f"nudge at {SILENCE_NUDGE_SEC}s",
+            flush=True,
+        )
 
         async def _watch() -> None:
+            nonlocal _last_silence_log_sec
             try:
-                await asyncio.sleep(SILENCE_NUDGE_SEC)
-                await _on_silence_timeout()
+                while True:
+                    await asyncio.sleep(0.25)
+                    if not _silence_watch_active() or agent_speaking or silence_handling:
+                        return
+                    elapsed = _silence_elapsed_sec()
+                    whole = int(elapsed)
+                    if whole > 0 and whole != _last_silence_log_sec:
+                        _last_silence_log_sec = whole
+                        print(
+                            f"[{call_sid}] 🔇 Silence {whole}s / {SILENCE_NUDGE_SEC:.0f}s",
+                            flush=True,
+                        )
+                    if elapsed >= SILENCE_NUDGE_SEC:
+                        await _on_silence_timeout(elapsed)
+                        return
             except asyncio.CancelledError:
                 pass
 
@@ -238,18 +284,21 @@ async def run_media_stream(
             await _speak_and_maybe_hangup(agent_reply)
         finally:
             silence_handling = False
+            print(f"[{call_sid}] 📤 Silence nudge complete — waiting for user", flush=True)
 
-    async def _on_silence_timeout() -> None:
+    async def _on_silence_timeout(elapsed_at_fire: float | None = None) -> None:
         nonlocal silence_nudge_count
         if not _silence_watch_active() or agent_speaking or silence_handling:
             return
 
+        elapsed = elapsed_at_fire if elapsed_at_fire is not None else _silence_elapsed_sec()
         silence_nudge_count += 1
         print(
-            f"[{call_sid}] 🔇 Silence {SILENCE_NUDGE_SEC}s "
-            f"(nudge {silence_nudge_count}/{MAX_CONSECUTIVE_SILENCE_NUDGES})",
+            f"[{call_sid}] 🔇 Silence threshold reached: {elapsed:.1f}s "
+            f"(nudge {silence_nudge_count}/{MAX_CONSECUTIVE_SILENCE_NUDGES}) — agent speaking",
             flush=True,
         )
+        await _cancel_silence_timer("timeout")
 
         if silence_nudge_count > MAX_CONSECUTIVE_SILENCE_NUDGES:
             await _speak_and_maybe_hangup(SILENCE_HANGUP_LINE, "no_response")
@@ -304,7 +353,7 @@ async def run_media_stream(
         await send_audio(spoken)
 
         if should_hangup and reason:
-            await _cancel_silence_timer()
+            await _cancel_silence_timer("hangup")
             await _hangup_call(reason)
 
     async def _check_and_handle_voicemail(text: str) -> bool:
@@ -325,7 +374,7 @@ async def run_media_stream(
     async def _handle_user_turn(user_text: str) -> None:
         nonlocal agent_speaking, first_user_turn, silence_nudge_count
 
-        await _cancel_silence_timer()
+        await _cancel_silence_timer("user_turn")
         silence_nudge_count = 0
 
         if session and session.call_should_end:
@@ -406,11 +455,19 @@ async def run_media_stream(
             session.stage_turn_count += 1
             session.sync_to_cfg()
             await _speak_and_maybe_hangup(agent_reply)
+            print(
+                f"[{call_sid}] 📤 User turn handled — waiting for user response",
+                flush=True,
+            )
         else:
             agent_reply = await ask_llm(
                 conversation_history, system_prompt, llm_provider, llm_model
             )
             await _speak_and_maybe_hangup(agent_reply)
+            print(
+                f"[{call_sid}] 📤 User turn handled — waiting for user response",
+                flush=True,
+            )
 
     async def _duration_watchdog() -> None:
         if not session:
@@ -437,7 +494,7 @@ async def run_media_stream(
         greeting_barge_guard_sec: float | None = None,
     ) -> None:
         nonlocal agent_speaking, greeting_barge_guard_until
-        await _cancel_silence_timer()
+        await _cancel_silence_timer("agent_speaking")
         if greeting_barge_guard_sec:
             greeting_barge_guard_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
                 seconds=greeting_barge_guard_sec
@@ -493,7 +550,7 @@ async def run_media_stream(
         agent_speaking = False
         print(f"[{call_sid}] ✅ Sent {chunk_count} chunks (interrupted={barge_in_event.is_set()})", flush=True)
         if not barge_in_event.is_set():
-            await _arm_silence_timer()
+            await _arm_silence_timer("agent_done")
 
     # ── Clear helper ───────────────────────────────────────────────────────────
     async def clear_stream() -> None:
@@ -602,7 +659,15 @@ async def run_media_stream(
                             await audio_queue.put(ulaw)
 
                 elif event == "mark":
-                    print(f"[{call_sid}] Mark: {data['mark']['name']}", flush=True)
+                    mark_name = (data.get("mark") or {}).get("name", "")
+                    print(f"[{call_sid}] Mark: {mark_name}", flush=True)
+                    if mark_name == "agent_done":
+                        elapsed = _silence_elapsed_sec()
+                        if elapsed > 0:
+                            print(
+                                f"[{call_sid}] 🔇 Post agent_done silence: {elapsed:.1f}s",
+                                flush=True,
+                            )
 
                 elif event == "stop":
                     print(f"[{call_sid}] Stream stopped", flush=True)
@@ -664,8 +729,6 @@ async def run_media_stream(
                                 await clear_stream()
                             elif agent_speaking and not _barge_in_allowed():
                                 continue
-                            else:
-                                await _cancel_silence_timer()
 
                             if is_final:
                                 label = "FINAL ✅" if speech_final else "FINAL"
@@ -747,7 +810,6 @@ async def run_media_stream(
                             # speech_start fires as soon as Sarvam detects voice —
                             # use it as a barge-in signal (faster than waiting for data).
                             if msg_type == "speech_start":
-                                await _cancel_silence_timer()
                                 if agent_speaking and _barge_in_allowed():
                                     agent_speaking = False
                                     barge_in_event.set()
@@ -768,8 +830,6 @@ async def run_media_stream(
                                     await clear_stream()
                                 elif agent_speaking and not _barge_in_allowed():
                                     continue
-                                else:
-                                    await _cancel_silence_timer()
 
                                 print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
 
@@ -797,7 +857,7 @@ async def run_media_stream(
     try:
         await telnyx_task
     finally:
-        await _cancel_silence_timer()
+        await _cancel_silence_timer("shutdown")
         if duration_timer and not duration_timer.done():
             duration_timer.cancel()
             with contextlib.suppress(asyncio.CancelledError):

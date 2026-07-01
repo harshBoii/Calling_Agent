@@ -83,21 +83,27 @@ Use the FIRST rule that matches, in this priority order:
 4. PARTIAL_PAYMENT_MADE
    - Confirmed partial payment action taken during or resulting from this call.
 5. PROMISE_TO_PAY
-   - Commits to a SPECIFIC amount AND date. Vague "I'll sort it out" does
-     not qualify — use CALLBACK_REQUESTED instead.
-6. HARDSHIP_CLAIMED
+   - Commits to pay the FULL outstanding amount by a SPECIFIC date. Vague
+     "I'll sort it out" does not qualify — use CALLBACK_REQUESTED instead.
+6. PROMISE_PARTIAL_PAYMENT
+   - Promised to pay partially for now: commits to a SPECIFIC partial amount
+     (less than full balance) with a date when possible. Agent should have stated
+     that the remaining balance is still due and full payment is required later.
+     Use when they cannot pay in full but agree to an interim partial payment.
+7. HARDSHIP_CLAIMED
    - Cites inability to pay (job loss, medical, etc.).
-7. CALLBACK_REQUESTED
+8. CALLBACK_REQUESTED
    - Wants to discuss further, no firm commitment yet, or asks to stop
      contact / be called later instead of resolving now.
-8. REFUSED_TO_PAY
+9. REFUSED_TO_PAY
    - Acknowledges debt, explicitly declines, no hardship/dispute raised.
-9. VOICEMAIL
-10. NO_ANSWER
-11. UNKNOWN
+10. VOICEMAIL
+11. NO_ANSWER
+12. UNKNOWN
 
 IMPORTANT: Never set outcome to DO_NOT_CALL — that value is not allowed.
-Only classify PROMISE_TO_PAY if both amount and date are explicit.
+Classify PROMISE_TO_PAY only for full-balance commitments with amount and date.
+Classify PROMISE_PARTIAL_PAYMENT when a specific partial amount is promised for now.
 Use latest signal if conflicting. Set "outcome" to exactly ONE enum value.
 """,
     "REMINDER": """
@@ -158,8 +164,9 @@ OUTCOME_VALUES_BY_VERTICAL: dict[str, list[str]] = {
     ],
     "COLLECTIONS": [
         "WRONG_NUMBER", "DISPUTED", "PAID_IN_FULL",
-        "PARTIAL_PAYMENT_MADE", "PROMISE_TO_PAY", "HARDSHIP_CLAIMED",
-        "CALLBACK_REQUESTED", "REFUSED_TO_PAY", "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
+        "PARTIAL_PAYMENT_MADE", "PROMISE_TO_PAY", "PROMISE_PARTIAL_PAYMENT",
+        "HARDSHIP_CLAIMED", "CALLBACK_REQUESTED", "REFUSED_TO_PAY",
+        "VOICEMAIL", "NO_ANSWER", "UNKNOWN",
     ],
     "REMINDER": [
         "WRONG_NUMBER", "CONFIRMED", "RESCHEDULE_REQUESTED",
@@ -206,8 +213,11 @@ EXTRA_SCHEMA_KEYS_BY_VERTICAL: dict[str, str] = {
     "SALES": '  - "objections" (array of strings): objections the lead raised.\n',
     "COLLECTIONS": (
         '  - "objections" (array of strings): disputes or pushback raised.\n'
-        '  - "promisedAmount" (number|null): amount promised, if PROMISE_TO_PAY.\n'
-        '  - "promisedDate" (string|null): ISO-8601 date promised, if PROMISE_TO_PAY.\n'
+        '  - "promisedAmount" (number|null): amount promised, if PROMISE_TO_PAY '
+        'or PROMISE_PARTIAL_PAYMENT.\n'
+        '  - "promisedDate" (string|null): ISO-8601 date promised, if PROMISE_TO_PAY '
+        'or PROMISE_PARTIAL_PAYMENT.\n'
+        '  - "promisedPartial" (boolean): true if outcome is PROMISE_PARTIAL_PAYMENT.\n'
         '  - "disputeReason" (string|null): reason given, if DISPUTED.\n'
     ),
     "REMINDER": (
@@ -370,4 +380,14 @@ def parse_analysis_json(raw: str, vertical: str | None) -> dict:
             obj["objections"] = list(themes)
 
     obj["outcome"] = validate_outcome(key, obj.get("outcome"))
+
+    if key == "COLLECTIONS":
+        outcome = obj.get("outcome")
+        if outcome == "PROMISE_PARTIAL_PAYMENT":
+            obj["promisedPartial"] = True
+        else:
+            obj.setdefault("promisedPartial", False)
+            if outcome == "PROMISE_TO_PAY":
+                obj["promisedPartial"] = False
+
     return obj

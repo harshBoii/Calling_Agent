@@ -48,9 +48,9 @@ AGENT_MISSION_BY_VERTICAL: dict[str, str] = {
         "handle objections briefly, and aim to book a meeting or agreed follow-up."
     ),
     "COLLECTIONS": (
-        "Collections call: confirm you are speaking with the contact by name "
+        "Collections call: confirm identity by name; state the outstanding matter "
         "(e.g. Am I speaking with [name]?); reference account context professionally; "
-        "work toward a clear promise-to-pay with specific amount and date when possible. "
+        "professionally; work toward payment via link or a clear promise-to-pay. "
         "Be empathetic and compliant. Do not upsell or pitch unrelated products."
     ),
     "REMINDER": (
@@ -112,6 +112,43 @@ def vertical_uses_sales_objection_hangup(vertical: str | None) -> bool:
 COLLECTIONS_SKIP_OBJECTION_KEYS: frozenset[str] = frozenset(
     {"busy_now", "send_email"}
 )
+
+
+def collections_payment_guardrail_lines(cfg: dict) -> list[str]:
+    """Strict collections payment rules for the live agent system prompt."""
+    ac = cfg.get("agent_config") or {}
+    kg = ac.get("knowledgeGrounding") or {}
+    whitelist = kg.get("claimWhitelist") or []
+    lines = [
+        "NEVER negotiate, discount, waive, or reduce the outstanding balance unless "
+        "call context or approved claims explicitly authorize a specific amount or settlement.",
+        "The ONLY concession you may offer without explicit authorization: suggest a "
+        "partial payment for now to help avoid further escalation from the company. "
+        "Whenever you offer or accept a partial payment, you MUST explicitly state that "
+        "the remaining balance is still due and full payment will be required later. "
+        "Do not offer multiple concessions or payment plans on your own.",
+        "If the contact hesitates, refuses, or mentions defaulting: calmly inform that "
+        "continued non-payment may lead to legal action and can negatively affect their "
+        "CIBIL score. Stay professional — inform, do not threaten or harass.",
+        "Prefer full payment via the payment link. If they cannot pay in full, secure a "
+        "partial promise-to-pay for now with a specific amount and date — and clearly "
+        "confirm the rest of the outstanding balance must be paid later.",
+    ]
+    if whitelist:
+        lines.append(
+            f"Approved claims you may use: {', '.join(whitelist)}"
+        )
+    auth_notes = (cfg.get("perks_of_product") or cfg.get("info_about_lead") or "").strip()
+    if auth_notes:
+        lines.append(f"Authorized payment/settlement context: {auth_notes}")
+    return lines
+
+
+def build_collections_payment_guardrails_section(cfg: dict) -> str:
+    """Markdown section for collections payment guardrails."""
+    lines = collections_payment_guardrail_lines(cfg)
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"## Collections payment rules (strict)\n{body}\n"
 
 
 def build_call_end_instructions(vertical: str | None) -> str:
@@ -199,8 +236,9 @@ def vertical_legacy_flow(vertical: str, perks: str) -> str:
         return "1. Greet → ask 0-10 rating → one brief follow-up → thank and close"
     if vertical == "COLLECTIONS":
         return (
-            "1. Verify identity → state purpose → discuss payment options → "
-            "secure promise-to-pay with amount and date when possible"
+            "1. Verify identity → state purpose → request full payment via link → "
+            "if unable, offer partial payment for now only (state full balance still due later) → "
+            "note legal/CIBIL impact if defaulting → secure promise-to-pay"
         )
     if vertical == "RENEWAL":
         return f"1. Greet → discuss renewal → present offer ({perks}) → confirm decision"
