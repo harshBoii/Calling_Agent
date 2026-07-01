@@ -33,6 +33,12 @@ sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+LLM_FALLBACK_REPLY = "Sorry, give me just a moment."
+CLAUDE_CALL_CONNECTED_CUE = "(The outbound call has connected.)"
+CLAUDE_SILENCE_USER_CUE = (
+    "(The user has not spoken yet — check if they are still on the line.)"
+)
+
 
 def _claude_temperature_deprecated(model: str) -> bool:
     """Newer Claude models reject explicit temperature (use model default)."""
@@ -45,6 +51,37 @@ async def _claude_messages_create(**kwargs):
     if _claude_temperature_deprecated(kwargs.get("model", "")):
         kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
     return await claude_client.messages.create(**kwargs)
+
+
+def prepare_claude_messages(
+    conversation_history: list,
+    *,
+    trailing_user_cue: str | None = None,
+) -> list[dict]:
+    """
+    Anthropic requires alternating roles, starting with user, ending with user
+    before the model's reply. Merge consecutive same-role turns in place.
+    """
+    msgs: list[dict] = []
+    for item in conversation_history:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        if msgs and msgs[-1]["role"] == role:
+            msgs[-1]["content"] = f"{msgs[-1]['content']}\n\n{content}"
+        else:
+            msgs.append({"role": role, "content": content})
+    if not msgs:
+        msgs.append({"role": "user", "content": CLAUDE_CALL_CONNECTED_CUE})
+    elif msgs[0]["role"] != "user":
+        msgs.insert(0, {"role": "user", "content": CLAUDE_CALL_CONNECTED_CUE})
+    if msgs[-1]["role"] != "user":
+        msgs.append({
+            "role": "user",
+            "content": trailing_user_cue or "Please continue the conversation.",
+        })
+    return msgs
 
 
 async def _sarvam_call(
@@ -289,6 +326,8 @@ async def ask_llm(
     system_prompt: str,
     provider: str,
     model: str,
+    *,
+    trailing_user_cue: str | None = None,
 ) -> str:
     """
     Unified LLM caller. Routes to the right provider.
@@ -324,10 +363,13 @@ async def ask_llm(
         if provider == "claude":
             if not claude_client:
                 raise ValueError("ANTHROPIC_API_KEY not set")
+            claude_messages = prepare_claude_messages(
+                conversation_history, trailing_user_cue=trailing_user_cue
+            )
             response = await _claude_messages_create(
                 model=model,
                 system=system_prompt,
-                messages=conversation_history,
+                messages=claude_messages,
                 max_tokens=4000,
             )
             return response.content[0].text.strip()
@@ -371,8 +413,11 @@ async def ask_llm(
         )
 
     except Exception as e:
-        print(f"[LLM/{provider}] Error: {e}", flush=True)
-        return "Sorry, give me just a moment."
+        import traceback
+
+        print(f"[LLM/{provider}] Error: {type(e).__name__}: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return LLM_FALLBACK_REPLY
 
 
 # --- Transcript analysis (webhook): needs room for structured JSON, not 150 tokens ---

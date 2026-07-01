@@ -33,7 +33,7 @@ from config import (
     to_sarvam_lang,
 )
 from intent_detection import build_intent_context, detect_intents
-from llm import ask_llm
+from llm import CLAUDE_SILENCE_USER_CUE, LLM_FALLBACK_REPLY, ask_llm
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook, send_call_status_webhook
 
@@ -168,6 +168,7 @@ async def run_media_stream(
     connected = False
     turns: list[dict] = []
     first_user_turn = True
+    user_has_spoken = False
     silence_nudge_count = 0
     silence_timer_task: asyncio.Task | None = None
     silence_handling = False
@@ -215,14 +216,24 @@ async def run_media_stream(
 
     async def _arm_silence_timer(reason: str = "agent_done") -> None:
         nonlocal silence_timer_task, waiting_for_user_since, _last_silence_log_sec
+        if not user_has_spoken:
+            print(
+                f"[{call_sid}] 🔇 Silence watch skipped — "
+                "no user speech yet (timer starts after first user turn)",
+                flush=True,
+            )
+            return
         if not _silence_watch_active():
-            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): inactive", flush=True)
+            print(f"[{call_sid}] 🔇 Silence watch skipped — call inactive", flush=True)
             return
         if agent_speaking:
-            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): agent speaking", flush=True)
+            print(f"[{call_sid}] 🔇 Silence watch skipped — agent speaking", flush=True)
             return
         if silence_handling:
-            print(f"[{call_sid}] 🔇 Silence watch skipped ({reason}): nudge in progress", flush=True)
+            print(
+                f"[{call_sid}] 🔇 Silence watch skipped — LLM nudge in flight",
+                flush=True,
+            )
             return
         await _cancel_silence_timer("re-arm")
         waiting_for_user_since = dt.datetime.now(dt.timezone.utc)
@@ -269,7 +280,11 @@ async def run_media_stream(
             if session:
                 turn_prompt = session.build_turn_prompt(base_system_prompt) + silence_hint
                 agent_reply = await ask_llm(
-                    conversation_history, turn_prompt, llm_provider, llm_model
+                    conversation_history,
+                    turn_prompt,
+                    llm_provider,
+                    llm_model,
+                    trailing_user_cue=CLAUDE_SILENCE_USER_CUE,
                 )
                 agent_reply = session.enforce_reply(agent_reply)
                 session.stage_turn_count += 1
@@ -280,11 +295,13 @@ async def run_media_stream(
                     system_prompt + silence_hint,
                     llm_provider,
                     llm_model,
+                    trailing_user_cue=CLAUDE_SILENCE_USER_CUE,
                 )
-            await _speak_and_maybe_hangup(agent_reply)
         finally:
             silence_handling = False
-            print(f"[{call_sid}] 📤 Silence nudge complete — waiting for user", flush=True)
+
+        await _speak_and_maybe_hangup(agent_reply)
+        print(f"[{call_sid}] 📤 Silence nudge complete — waiting for user", flush=True)
 
     async def _on_silence_timeout(elapsed_at_fire: float | None = None) -> None:
         nonlocal silence_nudge_count
@@ -347,7 +364,13 @@ async def run_media_stream(
                 should_hangup = True
                 reason = "agent_confident_end"
 
-        conversation_history.append({"role": "assistant", "content": spoken})
+        if spoken.strip() != LLM_FALLBACK_REPLY:
+            conversation_history.append({"role": "assistant", "content": spoken})
+        else:
+            print(
+                f"[{call_sid}] ⚠️ LLM fallback spoken — omitted from history",
+                flush=True,
+            )
         turns.append({"role": "agent", "text": spoken, "ts": _ts()})
         print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {spoken}", flush=True)
         await send_audio(spoken)
@@ -372,7 +395,7 @@ async def run_media_stream(
         return True
 
     async def _handle_user_turn(user_text: str) -> None:
-        nonlocal agent_speaking, first_user_turn, silence_nudge_count
+        nonlocal agent_speaking, first_user_turn, silence_nudge_count, user_has_spoken
 
         await _cancel_silence_timer("user_turn")
         silence_nudge_count = 0
@@ -385,6 +408,7 @@ async def run_media_stream(
             if await _check_and_handle_voicemail(user_text):
                 return
 
+        user_has_spoken = True
         print(f"[{call_sid}] 🎤 Human: {user_text}", flush=True)
         conversation_history.append({"role": "user", "content": user_text})
         turns.append({"role": "user", "text": user_text, "ts": _ts()})
