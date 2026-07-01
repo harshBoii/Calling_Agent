@@ -20,6 +20,7 @@ from config import (
     SARVAM_API_KEY,
 )
 from agent_config import get_discovery_stage_goal, get_greeting_stage_goal
+from campaign_vertical import greeting_instructions, normalize_campaign_vertical, questions_generation_task
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -68,13 +69,21 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
 
     stage_goal = get_greeting_stage_goal(cfg.get("agent_config"))
     goal_line = f"\n- Stage goal: {stage_goal}" if stage_goal else ""
+    vertical = normalize_campaign_vertical(cfg.get("campaign_type"))
+    greeting_extra = greeting_instructions(vertical, cfg)
+    call_kind = {
+        "SALES": "outbound sales call",
+        "COLLECTIONS": "account collections call",
+        "REMINDER": "appointment reminder call",
+        "SURVEY": "brief feedback/NPS call",
+        "RENEWAL": "renewal call",
+    }.get(vertical, "outbound call")
 
-    prompt = f"""You are making an outbound sales call on behalf of {cfg['company']}.
+    prompt = f"""You are making an {call_kind} on behalf of {cfg['company']}.
 
 Generate a warm, natural opening line for a phone call. Respond with text written only in {cfg['language']}:
 - Introduce yourself as {cfg['agent_name']} from {cfg['company']}
-- Tease the offer: {cfg['perks_of_product']}
-- End with a soft permission question ("Is this a good time?")
+{greeting_extra}
 - Sound like a real human — not scripted or robotic
 - Be MAX 1-3 short sentences total ,keep the greeting short inturn increase the chances of lead to listen and understand the pitch.
 - Speak in {cfg['language']}{goal_line}
@@ -180,8 +189,10 @@ async def generate_questions_to_ask(cfg: dict, provider: str | None = None) -> s
         blacklist_note = f"\n- Do NOT ask about: {', '.join(blacklist)}"
 
     goal_note = f"\n- Discovery goal: {discovery_goal}" if discovery_goal else ""
+    vertical = normalize_campaign_vertical(cfg.get("campaign_type"))
+    task = questions_generation_task(vertical, cfg.get("language") or "English")
 
-    prompt = f"""You are drafting discovery questions for a 2-minute outbound sales call.
+    prompt = f"""You are drafting questions for a phone call.
 
 Context:
 - Language: {cfg.get('language')}
@@ -190,9 +201,7 @@ Context:
 - Lead context (use subtly): {cfg.get('info_about_lead')}{goal_note}{blacklist_note}
 
 Task:
-- Produce 2 to 4 short, natural questions the agent should ask early in the call.
-- Questions must be in {cfg.get('language')}.
-- Each question should be <= 12 words.
+- {task}
 - Avoid sounding robotic. Avoid personal/sensitive data questions.
 
 Output format:

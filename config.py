@@ -164,8 +164,7 @@ AGENT_ROLE = "warm and persuasive sales representative"
 
 SYSTEM_PROMPT_TEMPLATE = """You are {Agent_Name} , a {AGENT_ROLE} representative calling on behalf of {COMPANY} RESPOND WITH text written only in {LANGUAGE} AND IN HUMANE WAY , IT'S OK TO BE A LITTLE MESSY LIKE HUMANS ARE.
 
-## Your Goal
-Sell to {NAME}. The offer: {PERKS_OF_PRODUCT}. Close the call with either a confirmed interest or a scheduled follow-up.
+{GOAL_SECTION}
 
 ## What You Know About This Lead
 {INFO_ABOUT_LEAD}
@@ -176,7 +175,7 @@ Use this intel subtly — don't reference it directly. Let it shape HOW you pitc
 - Max 1-2 sentences per response — this is a phone call, not an email
 
 ## Conversation Flow
-1. start by asking permission to ask questions tied to their situation → Bridge → connect their pain naturally → present {PERKS_OF_PRODUCT} as the solution
+{FLOW_SECTION}
 You have to ask these questions to the lead:{QUESTIONS_TO_ASK}
 
 ## Tone
@@ -218,6 +217,24 @@ def _normalize_previous_chat_context(raw) -> str | None:
     return s if s else None
 
 
+def build_legacy_system_prompt(ctx: dict, vertical: str) -> str:
+    from campaign_vertical import (
+        AGENT_MISSION_BY_VERTICAL,
+        vertical_legacy_flow,
+        vertical_legacy_goal,
+    )
+
+    goal = vertical_legacy_goal(vertical, ctx["NAME"], ctx["PERKS_OF_PRODUCT"])
+    mission = AGENT_MISSION_BY_VERTICAL.get(vertical, AGENT_MISSION_BY_VERTICAL["SALES"])
+    goal_section = f"## Your Goal\n{goal}\n\n## Campaign objective\n{mission}"
+    flow_section = vertical_legacy_flow(vertical, ctx["PERKS_OF_PRODUCT"])
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        **ctx,
+        GOAL_SECTION=goal_section,
+        FLOW_SECTION=flow_section,
+    )
+
+
 def build_call_config(body: dict | None) -> dict:
     from agent_config import (
         _resolve_role_framing,
@@ -226,6 +243,7 @@ def build_call_config(body: dict | None) -> dict:
         normalize_meet_slots,
         parse_and_merge,
     )
+    from campaign_vertical import normalize_campaign_vertical
 
     print(f"[BUILD_CALL_CONFIG] Body: {body}", flush=True)
     agent_config, b = parse_and_merge(body)
@@ -281,6 +299,10 @@ def build_call_config(body: dict | None) -> dict:
     stt_raw = b.get("stt_provider", "auto").lower()  # "auto" | "deepgram" | "sarvam"
     stt_provider = _auto_select_stt(dg_language) if stt_raw == "auto" else stt_raw
 
+    campaign_type = normalize_campaign_vertical(
+        b.get("campaign_type") or b.get("campaignType")
+    )
+
     ctx = _format_vars(
         language=language,
         name=name,
@@ -314,13 +336,14 @@ def build_call_config(body: dict | None) -> dict:
             "questions_to_ask": questions_to_ask,
             "previous_chat_context": previous_chat_context,
             "agent_config": agent_config,
+            "campaign_type": campaign_type,
         }
         system_prompt = build_base_system_prompt(interim, custom_prompt=custom_prompt)
         system_prompt = prepend_previous_chat_context(
             system_prompt, previous_chat_context
         )
     else:
-        system_prompt = custom_prompt or SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+        system_prompt = custom_prompt or build_legacy_system_prompt(ctx, campaign_type)
         system_prompt = prepend_previous_chat_context(
             system_prompt, previous_chat_context
         )
@@ -348,6 +371,7 @@ def build_call_config(body: dict | None) -> dict:
         "sarvam_speaker": sarvam_speaker,
         "agent_config": agent_config,
         "dynamic_greeting": b.get("dynamic_greeting", True),
+        "campaign_type": campaign_type,
         "available_meet_slots": normalize_meet_slots(b.get("available_meet_slots")),
     }
     slots = res["available_meet_slots"]

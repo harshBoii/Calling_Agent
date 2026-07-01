@@ -23,10 +23,10 @@ from config import (
     ON_DEMAND_DEADLINE_SEC,
     ONCALL_QUEUE,
     REDIS_URL,
-    SYSTEM_PROMPT_TEMPLATE,
     TELNYX_PHONE_NUMBER,
     USE_ARQ_QUEUE,
     build_call_config,
+    build_legacy_system_prompt,
     prepend_previous_chat_context,
 )
 from llm import generate_opening_greeting, generate_questions_to_ask
@@ -407,7 +407,8 @@ async def make_outbound_call(request: Request):
             "QUESTIONS_TO_ASK": cfg["questions_to_ask"],
         }
         print(f"Request Body: {ctx}")
-        cfg["system_prompt"] = SYSTEM_PROMPT_TEMPLATE.format(**ctx)
+        vertical = cfg.get("campaign_type") or "SALES"
+        cfg["system_prompt"] = build_legacy_system_prompt(ctx, vertical)
         cfg["system_prompt"] = prepend_previous_chat_context(
             cfg["system_prompt"],
             cfg.get("previous_chat_context"),

@@ -5,7 +5,6 @@ import datetime as dt
 import hashlib
 import hmac
 import json
-import re
 import uuid
 
 
@@ -20,182 +19,8 @@ from config import (
     WEBHOOK_SECRET,
     WEBHOOK_SMS,
 )
+from call_analysis import get_analysis_prompt, parse_analysis_json
 from llm import ask_llm_for_analysis
-
-
-CALL_OUTCOME_RULES = """
-Classify this call transcript into exactly ONE of the following outcomes.
-Use the FIRST rule that matches, in this priority order:
-
-1. DO_NOT_CALL
-   - Prospect explicitly asks to be removed from the call list, says "don't call
-     again," "remove my number," "stop calling," or expresses hostility/anger
-     specifically about being called.
-   - Takes priority over everything else, even if interest was shown earlier
-     in the same call.
-
-2. WRONG_NUMBER
-   - Person confirms they are not the intended lead (different person, wrong
-     company, "no one here by that name," reassigned number).
-   - Only use if explicitly confirmed — do not infer from silence or confusion.
-
-3. MEET_REQUESTED
-   - Prospect agrees to a specific next step with a time/date component:
-     demo, meeting, callback at a SPECIFIC time ("call me tomorrow at 3"),
-     or agrees to a calendar link / confirms a booking.
-   - Must be an explicit commitment, not just "maybe send info."
-
-4. CALLBACK
-   - Prospect asks to be called back but WITHOUT a specific time commitment
-     ("call me later," "I'm busy right now," "try me next week" without a date).
-   - Also use if they ask to speak to someone else at the company later.
-
-5. INTERESTED
-   - Prospect engages positively: asks about pricing/features, asks clarifying
-     questions about the product, says "sounds interesting," "tell me more,"
-     or agrees to receive follow-up info (email/WhatsApp) without a firm
-     meeting commitment.
-   - Distinguish from CALLBACK: INTERESTED = engaged in THIS call.
-     CALLBACK = wants to engage LATER instead of now.
-
-6. NOT_INTERESTED
-   - Prospect explicitly declines: "not interested," "we don't need this,"
-     "already have a solution," "no thanks" — WITHOUT hostility or an
-     explicit do-not-call request.
-   - Polite decline only. If hostile/repeated demand to stop → DO_NOT_CALL instead.
-
-7. VOICEMAIL
-   - Call reached voicemail/answering machine (with or without message left).
-   - Detected via call metadata (Telnyx answering_machine_detection) or
-     transcript pattern (automated greeting, beep, no live turn-taking).
-
-8. NO_ANSWER
-   - Call rang out / not picked up. No transcript exists, or transcript is
-     empty/near-empty with no human turn.
-
-9. UNKNOWN
-   - Call connected but transcript is unintelligible, disconnected mid-call
-     with no signal either way, wrong language the agent can't parse,
-     or genuinely ambiguous (e.g., prospect hung up immediately with no words).
-   - Use sparingly — this should be a small % of calls, not a dumping ground
-     for effort-avoidance. Only use when no other rule reasonably applies.
-
-IMPORTANT:
-- Base classification ONLY on what was explicitly said or clearly evidenced
-  in the transcript/metadata. Do not infer tone or sentiment beyond what's stated.
-- If multiple signals conflict (e.g., prospect says "not interested" then later
-  asks "actually, what's the price?"), use the LATEST signal in the conversation,
-  since that reflects their final position.
-- Set the "outcome" field to exactly ONE enum value from the list above.
-"""
-
-
-_ANALYSIS_SYSTEM_PROMPT = (
-    "You are a sales-call analyst. Analyze the transcript of a phone call "
-    "between an AI sales agent and a human lead, and produce a structured "
-    "JSON report.\n\n"
-    "Return STRICT JSON (no prose, no markdown fences) with EXACTLY these keys:\n"
-    '  - "summary" (string): 1-3 sentence summary of the call.\n'
-    '  - "outcome" (string): one of '
-    "DO_NOT_CALL, WRONG_NUMBER, MEET_REQUESTED, CALLBACK, INTERESTED, "
-    "NOT_INTERESTED, VOICEMAIL, NO_ANSWER, UNKNOWN.\n"
-    '  - "followUpAgreed" (boolean): true if the lead explicitly agreed to a follow-up call or scheduled callback; otherwise false.\n'
-    '  - "followUpAt" (string|null): the scheduled follow-up time as an ISO-8601 UTC timestamp (e.g. "2026-04-23T15:30:00Z") if the time can be determined; otherwise null.\n'
-    '  - "sentiment" (string): one of POSITIVE, NEUTRAL, NEGATIVE.\n'
-    '  - "objections" (array of strings): short phrases describing objections the lead raised.\n'
-    '  - "aiConfidence" (number): 0.0 to 1.0, your confidence in this classification.\n'
-    '  - "suggestedNextMove" (string): concrete next action the sales team should take.\n\n'
-    "Rules: respond with a single JSON object only. Put all string values on one line; "
-    "escape any double quote inside a string as \\\". Do not use markdown. "
-    "If uncertain about followUpAt, use null.\n\n"
-    "Outcome classification (apply to the \"outcome\" field):\n"
-    f"{CALL_OUTCOME_RULES}"
-)
-
-
-def _strip_code_fences(text: str) -> str:
-    s = text.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-    return s.strip()
-
-
-def _extract_first_json_object(s: str) -> str | None:
-    """Find the first top-level balanced {...} honoring strings and escapes."""
-    start = s.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        c = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-            continue
-        if c == '"':
-            in_str = True
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-    return None
-
-
-def _parse_json_strict(raw: str) -> dict:
-    s = _strip_code_fences(raw)
-    if not s.strip():
-        raise ValueError("Empty LLM response")
-
-    candidates: list[str] = []
-    for c in (s, _extract_first_json_object(s)):
-        if c and c.strip() and c not in candidates:
-            candidates.append(c)
-    obj = None
-    last_json_err: Exception | None = None
-    for candidate in candidates:
-        try:
-            obj = json.loads(candidate)
-            break
-        except json.JSONDecodeError as e:
-            last_json_err = e
-    if obj is None:
-        raise ValueError(f"No valid JSON in LLM response: {last_json_err}")
-    required = {
-        "summary",
-        "outcome",
-        "followUpAgreed",
-        "followUpAt",
-        "sentiment",
-        "objections",
-        "aiConfidence",
-        "suggestedNextMove",
-    }
-    missing = required - set(obj.keys())
-    if missing:
-        raise ValueError(f"Analysis JSON missing keys: {missing}")
-    if not isinstance(obj["objections"], list):
-        raise ValueError("'objections' must be a list")
-    fup = obj.get("followUpAgreed")
-    if isinstance(fup, str):
-        low = fup.strip().lower()
-        if low == "true":
-            obj["followUpAgreed"] = True
-        elif low == "false":
-            obj["followUpAgreed"] = False
-    if not isinstance(obj["followUpAgreed"], bool):
-        raise ValueError("'followUpAgreed' must be a boolean")
-    if obj["followUpAt"] is not None and not isinstance(obj["followUpAt"], str):
-        raise ValueError("'followUpAt' must be a string or null")
-    return obj
 
 
 def _default_analysis() -> dict:
@@ -227,16 +52,19 @@ async def analyze_transcript(turns: list[dict], cfg: dict, *, call_ended_at: dt.
         provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER]
     )
 
+    vertical = cfg.get("campaign_type") or "SALES"
+    system_prompt = get_analysis_prompt(vertical)
+
     last_err: Exception | None = None
     for attempt in range(3):
         raw: str | None = None
         try:
             raw = await ask_llm_for_analysis(
-                user_msg, _ANALYSIS_SYSTEM_PROMPT, provider, model
+                user_msg, system_prompt, provider, model
             )
             if not raw or raw.strip().lower().startswith("sorry, give me"):
                 raise ValueError(f"LLM returned fallback/empty: {raw!r}")
-            return _parse_json_strict(raw)
+            return parse_analysis_json(raw, vertical)
         except Exception as e:
             last_err = e
             print(f"[WEBHOOK] analyze attempt {attempt + 1}/3 failed: {e}", flush=True)
@@ -355,7 +183,7 @@ def build_payload(call_record: dict, cfg: dict, analysis: dict) -> dict:
         "transcript": {
             "summary": analysis.get("summary"),
             "turns": turns,
-            "objections": analysis.get("objections") or [],
+            "objections": analysis.get("objections") or [],  # sales/collections objections or survey themes
             "aiConfidence": analysis.get("aiConfidence"),
             "suggestedNextMove": analysis.get("suggestedNextMove"),
             "qa": _extract_question_answer_map(turns),

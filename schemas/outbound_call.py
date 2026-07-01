@@ -2,7 +2,15 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+CampaignType = Literal[
+    "Sales",
+    "Collection",
+    "Appointment reminders",
+    "Feedback / NPS",
+    "Renewal / win-back",
+]
 
 
 class VoiceConfig(BaseModel):
@@ -143,6 +151,10 @@ class OutboundCallRequest(BaseModel):
     companyId: str | None = None
     leadId: str | None = None
     campaignId: str | None = None
+    campaign_type: CampaignType | None = Field(
+        default=None,
+        validation_alias=AliasChoices("campaign_type", "campaignType"),
+    )
     name: str | None = None
     company: str | None = None
     product: str | None = None

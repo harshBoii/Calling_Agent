@@ -9,6 +9,14 @@ import datetime as dt
 
 from schemas.outbound_call import AgentConfig, ConversationStage, OutboundCallRequest
 
+from campaign_vertical import (
+    AGENT_MISSION_BY_VERTICAL,
+    AGENT_OMIT_BOOKING,
+    AGENT_OMIT_DISCOVERY_QUESTIONS,
+    build_call_context_lines,
+    normalize_campaign_vertical,
+)
+
 # ─── Keyword heuristics for stage routing ─────────────────────────────────────
 
 _OBJECTION_KEYWORDS: dict[str, list[str]] = {
@@ -339,6 +347,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
     agent_role = cfg.get("agent_role") or _resolve_role_framing(
         identity.get("roleFraming"), cfg.get("company", "")
     )
+    vertical = normalize_campaign_vertical(cfg.get("campaign_type"))
 
     parts: list[str] = []
 
@@ -350,6 +359,10 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
         f"You are {agent_name}, {agent_role}, calling on behalf of {cfg.get('company')}."
     )
     parts.append(f"Respond in {cfg.get('language', 'English')} only. Sound human and natural.")
+
+    parts.append(
+        _section("Campaign objective", [AGENT_MISSION_BY_VERTICAL[vertical]])
+    )
 
     if personality:
         parts.append(
@@ -365,14 +378,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
         )
 
     parts.append(
-        _section(
-            "Call context",
-            [
-                f"Lead name: {cfg.get('name')}",
-                f"Offer: {cfg.get('perks_of_product')}",
-                f"Lead intel (use subtly): {cfg.get('info_about_lead')}",
-            ],
-        )
+        _section("Call context", build_call_context_lines(cfg, vertical))
     )
 
     kg_lines = []
@@ -447,7 +453,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
     parts.append(_section("Behavioral guardrails (strict)", guard_lines))
     parts.append(CALL_END_INSTRUCTIONS)
 
-    if booking.get("closeTrigger"):
+    if booking.get("closeTrigger") and vertical not in AGENT_OMIT_BOOKING:
         parts.append(
             _section(
                 "Booking trigger",
@@ -471,7 +477,7 @@ def build_base_system_prompt(cfg: dict, custom_prompt: str | None = None) -> str
                 "If the lead goes off-script, briefly acknowledge then redirect to the current stage goal."
             )
 
-    if cfg.get("questions_to_ask"):
+    if cfg.get("questions_to_ask") and vertical not in AGENT_OMIT_DISCOVERY_QUESTIONS:
         parts.append(f"## Discovery questions\n{cfg['questions_to_ask']}")
 
     return "\n\n".join(p for p in parts if p.strip())

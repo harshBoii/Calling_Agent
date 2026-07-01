@@ -120,6 +120,7 @@ Places an AI voice call via Telnyx. Conversation runs over WebSocket on this ser
 | `companyId` | no | string | Passed through to completion webhook |
 | `leadId` | no | string | Passed through to completion webhook |
 | `campaignId` | no | string | Passed through to completion webhook |
+| `campaign_type` / `campaignType` | no | string | `Sales` (default if omitted) \| `Collection` \| `Appointment reminders` \| `Feedback / NPS` \| `Renewal / win-back`. Drives live agent system prompt and post-call outcome analysis. |
 | `language` / `languageMode` | no | string | Spoken language (default `"English"`) |
 | `deepgram_language` / `deepgramLanguage` | no | string | STT code (default `"en"`) |
 | `elevenlabs_model` / `voiceMode` | no | string | TTS model |
@@ -173,6 +174,7 @@ When present, drives conversation stages, guardrails, objections, compliance, an
 | Section | Runtime effect |
 |---------|----------------|
 | `identity` | Personality tone/formality in system prompt |
+| `campaign_type` | Vertical agent mission injected into system prompt; overrides default sales discovery/booking framing for non-Sales campaigns |
 | `conversationFlow.stages` | Stage machine: each LLM turn gets active stage goal; advances on `maxTurns`, exit heuristics, or `skipToTargets` |
 | `knowledgeGrounding` | Strict claim whitelist/blacklist; `unknownFactFallbackLine` when unsure |
 | `objectionHandling` | Objection library injected into prompt; max attempts → soft close + end call |
@@ -207,6 +209,7 @@ Invalid `agent_config` returns **`400`** with Pydantic validation errors.
   "companyId": "cmp_abc",
   "leadId": "lead_xyz",
   "campaignId": "camp_123",
+  "campaign_type": "Sales",
   "name": "Rahul",
   "company": "Acme Corp",
   "product": "GEO optimization services",
@@ -343,7 +346,17 @@ Posted to `WEBHOOK_CALL` when the media stream ends.
 
 **`call.status`:** `COMPLETED` if media stream started; `FAILED` if never connected.
 
-**`call.outcome`:** `INTERESTED` | `NOT_INTERESTED` | `CALLBACK` | `VOICEMAIL` | `NO_ANSWER` | `DO_NOT_CALL` | `UNKNOWN` (LLM-analyzed).
+**`call.outcome`:** LLM-analyzed; values depend on `campaign_type` sent with the call (default `Sales`):
+
+| Campaign type | `call.outcome` values |
+|---------------|----------------------|
+| **Sales** | `DO_NOT_CALL`, `WRONG_NUMBER`, `MEET_REQUESTED`, `CALLBACK`, `INTERESTED`, `NOT_INTERESTED`, `VOICEMAIL`, `NO_ANSWER`, `UNKNOWN` |
+| **Collection** | `DO_NOT_CALL`, `WRONG_NUMBER`, `DISPUTED`, `PAID_IN_FULL`, `PARTIAL_PAYMENT_MADE`, `PROMISE_TO_PAY`, `HARDSHIP_CLAIMED`, `CALLBACK_REQUESTED`, `REFUSED_TO_PAY`, `VOICEMAIL`, `NO_ANSWER`, `UNKNOWN` |
+| **Appointment reminders** | `DO_NOT_CALL`, `WRONG_NUMBER`, `CONFIRMED`, `RESCHEDULE_REQUESTED`, `CANCELLED`, `VOICEMAIL`, `NO_ANSWER`, `UNKNOWN` |
+| **Feedback / NPS** | `DO_NOT_CALL`, `WRONG_NUMBER`, `RESPONDED_POSITIVE`, `RESPONDED_NEUTRAL`, `RESPONDED_NEGATIVE`, `DECLINED_SURVEY`, `VOICEMAIL`, `NO_ANSWER`, `UNKNOWN` |
+| **Renewal / win-back** | `DO_NOT_CALL`, `WRONG_NUMBER`, `RENEWED`, `DECLINED_RENEWAL`, `DOWNGRADE_REQUESTED`, `NEEDS_DISCOUNT_APPROVAL`, `CALLBACK`, `VOICEMAIL`, `NO_ANSWER`, `UNKNOWN` |
+
+`transcript.objections` is reused semantically: sales/collections objections, or survey feedback themes for NPS campaigns.
 
 **`call.sentiment`:** `POSITIVE` | `NEUTRAL` | `NEGATIVE`.
 
