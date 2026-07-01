@@ -26,6 +26,7 @@ from config import (
     MAX_CONSECUTIVE_SILENCE_NUDGES,
     MIN_WORDS_TO_RESPOND,
     SARVAM_API_KEY,
+    GREETING_BARGE_IN_GUARD_SEC,
     SILENCE_HANGUP_LINE,
     SILENCE_NUDGE_SEC,
     deepgram_ws_url,
@@ -170,6 +171,12 @@ async def run_media_stream(
     silence_nudge_count = 0
     silence_timer_task: asyncio.Task | None = None
     silence_handling = False
+    greeting_barge_guard_until: dt.datetime | None = None
+
+    def _barge_in_allowed() -> bool:
+        if greeting_barge_guard_until is None:
+            return True
+        return dt.datetime.now(dt.timezone.utc) >= greeting_barge_guard_until
 
     def _silence_watch_active() -> bool:
         if hangup_requested:
@@ -423,9 +430,23 @@ async def run_media_stream(
         print(f"[{call_sid}] Max call duration reached ({max_sec}s)", flush=True)
 
     # ── TTS sender ─────────────────────────────────────────────────────────────
-    async def send_audio(text: str, override_voice_id: str | None = None) -> None:
-        nonlocal agent_speaking
+    async def send_audio(
+        text: str,
+        override_voice_id: str | None = None,
+        *,
+        greeting_barge_guard_sec: float | None = None,
+    ) -> None:
+        nonlocal agent_speaking, greeting_barge_guard_until
         await _cancel_silence_timer()
+        if greeting_barge_guard_sec:
+            greeting_barge_guard_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                seconds=greeting_barge_guard_sec
+            )
+            print(
+                f"[{call_sid}] 🛡️ Greeting barge-in blocked for "
+                f"{greeting_barge_guard_sec}s",
+                flush=True,
+            )
         agent_speaking = True
         barge_in_event.clear()  # arm: clear any previous interrupt signal
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
@@ -441,9 +462,11 @@ async def run_media_stream(
             # Because tts.py now yields small chunks (~250 ms each), this check
             # fires frequently enough to stop playback almost instantly when the
             # user starts speaking.
-            if barge_in_event.is_set():
+            if barge_in_event.is_set() and _barge_in_allowed():
                 print(f"[{call_sid}] ⚡ Barge-in — discarding remaining TTS chunks", flush=True)
                 break
+            if barge_in_event.is_set() and not _barge_in_allowed():
+                barge_in_event.clear()
 
             if not audio_b64:
                 continue
@@ -539,7 +562,7 @@ async def run_media_stream(
                         if rec_msg:
                             await send_audio(rec_msg, override_voice_id=ELEVENLABS_VOICE_ID)
                             await asyncio.sleep(0.5)
-                        await send_audio(opening_greeting)
+                        await send_audio(opening_greeting, greeting_barge_guard_sec=GREETING_BARGE_IN_GUARD_SEC)
 
                     asyncio.create_task(_play_intro())
 
@@ -554,7 +577,7 @@ async def run_media_stream(
                             # ── Immediate RMS barge-in ─────────────────────────
                             # This fires BEFORE STT has a chance to produce a
                             # transcript, giving sub-100 ms interrupt latency.
-                            if agent_speaking:
+                            if agent_speaking and _barge_in_allowed():
                                 try:
                                     pcm = audioop.ulaw2lin(ulaw, 2)
                                     rms = audioop.rms(pcm, 2)
@@ -634,11 +657,13 @@ async def run_media_stream(
 
                             # STT-level barge-in (fires after RMS already did, but
                             # handles the case where RMS missed a quiet start).
-                            if agent_speaking:
+                            if agent_speaking and _barge_in_allowed():
                                 agent_speaking = False
                                 barge_in_event.set()
                                 print(f"[{call_sid}] ⚡ STT barge-in (Deepgram)", flush=True)
                                 await clear_stream()
+                            elif agent_speaking and not _barge_in_allowed():
+                                continue
                             else:
                                 await _cancel_silence_timer()
 
@@ -723,7 +748,7 @@ async def run_media_stream(
                             # use it as a barge-in signal (faster than waiting for data).
                             if msg_type == "speech_start":
                                 await _cancel_silence_timer()
-                                if agent_speaking:
+                                if agent_speaking and _barge_in_allowed():
                                     agent_speaking = False
                                     barge_in_event.set()
                                     print(f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)", flush=True)
@@ -737,10 +762,12 @@ async def run_media_stream(
                                     continue
 
                                 # Catch any remaining agent_speaking state missed by RMS/speech_start.
-                                if agent_speaking:
+                                if agent_speaking and _barge_in_allowed():
                                     agent_speaking = False
                                     barge_in_event.set()
                                     await clear_stream()
+                                elif agent_speaking and not _barge_in_allowed():
+                                    continue
                                 else:
                                     await _cancel_silence_timer()
 
