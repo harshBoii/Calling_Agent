@@ -34,6 +34,19 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
+def _claude_temperature_deprecated(model: str) -> bool:
+    """Newer Claude models reject explicit temperature (use model default)."""
+    m = (model or "").lower()
+    return "sonnet-5" in m or m.startswith("claude-opus-4-")
+
+
+async def _claude_messages_create(**kwargs):
+    """Create Claude message; omit temperature when the model rejects it."""
+    if _claude_temperature_deprecated(kwargs.get("model", "")):
+        kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
+    return await claude_client.messages.create(**kwargs)
+
+
 async def _sarvam_call(
     *, model: str, messages: list, temperature: float, max_tokens: int
 ) -> str:
@@ -79,6 +92,14 @@ async def generate_opening_greeting(cfg: dict, provider: str | None = None) -> s
         "RENEWAL": "renewal call",
     }.get(vertical, "outbound call")
 
+    lead_name = (cfg.get("name") or "").strip()
+    collections_note = ""
+    if vertical == "COLLECTIONS" and lead_name:
+        collections_note = (
+            f"\n- Collections: you MUST ask \"Am I speaking with {lead_name}?\" "
+            f"using that exact name — not \"the right person\"."
+        )
+
     prompt = f"""You are making an {call_kind} on behalf of {cfg['company']}.
 
 Generate a warm, natural opening line for a phone call. Respond with text written only in {cfg['language']}:
@@ -86,8 +107,9 @@ Generate a warm, natural opening line for a phone call. Respond with text writte
 {greeting_extra}
 - Sound like a real human — not scripted or robotic
 - Be MAX 1-3 short sentences total ,keep the greeting short inturn increase the chances of lead to listen and understand the pitch.
-- Speak in {cfg['language']}{goal_line}
+- Speak in {cfg['language']}{goal_line}{collections_note}
 
+Lead name: {lead_name or "(not provided)"}
 Lead context (use subtly to personalize tone, don't state it directly):
 {cfg['info_about_lead']}
 
@@ -114,7 +136,7 @@ Output ONLY the spoken greeting text. No quotes, no labels, no explanation."""
 
     if p == "claude" and claude_client:
         print("[GREETING] Using Claude", flush=True)
-        resp = await claude_client.messages.create(
+        resp = await _claude_messages_create(
             model=llm_model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=4000,
@@ -224,7 +246,7 @@ Return ONLY the questions, one per line. No numbering, no bullets, no extra text
             )
             raw = resp.choices[0].message.content.strip()
         elif p == "claude" and claude_client:
-            resp = await claude_client.messages.create(
+            resp = await _claude_messages_create(
                 model=llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=500,
@@ -302,7 +324,7 @@ async def ask_llm(
         if provider == "claude":
             if not claude_client:
                 raise ValueError("ANTHROPIC_API_KEY not set")
-            response = await claude_client.messages.create(
+            response = await _claude_messages_create(
                 model=model,
                 system=system_prompt,
                 messages=conversation_history,
@@ -398,7 +420,7 @@ async def ask_llm_for_analysis(
     if p == "claude":
         if not claude_client:
             raise ValueError("ANTHROPIC_API_KEY not set")
-        response = await claude_client.messages.create(
+        response = await _claude_messages_create(
             model=model,
             system=system_prompt,
             messages=conversation_history,

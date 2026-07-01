@@ -19,6 +19,8 @@ from campaign_vertical import (
     build_close_goal_section,
     normalize_campaign_vertical,
     vertical_allows_meeting_slots,
+    vertical_uses_sales_objection_hangup,
+    COLLECTIONS_SKIP_OBJECTION_KEYS,
 )
 
 # ─── Keyword heuristics for stage routing ─────────────────────────────────────
@@ -271,7 +273,10 @@ def evaluate_hangup_confidence(session: "ConversationSession", spoken: str, mark
         if any(p in low for p in _GOODBYE_PHRASES):
             return True, "booking_confirmed"
 
-    if session.objection_attempts >= session._max_objection_attempts():
+    if (
+        session.uses_sales_objection_hangup()
+        and session.objection_attempts >= session._max_objection_attempts()
+    ):
         return True, "no_interest"
 
     if session.no_interest_streak >= 2 and any(
@@ -583,6 +588,9 @@ class ConversationSession:
     def allows_meeting_slots(self) -> bool:
         return vertical_allows_meeting_slots(self.campaign_vertical())
 
+    def uses_sales_objection_hangup(self) -> bool:
+        return vertical_uses_sales_objection_hangup(self.campaign_vertical())
+
     @property
     def current_stage_key(self) -> str:
         if not self.stages:
@@ -730,7 +738,12 @@ Focus ONLY on this stage goal for your next reply."""
 
     def detect_objection(self, user_text: str) -> str | None:
         low = user_text.lower()
+        skip_keys: frozenset[str] = frozenset()
+        if self.campaign_vertical() == "COLLECTIONS":
+            skip_keys = COLLECTIONS_SKIP_OBJECTION_KEYS
         for key, keywords in _OBJECTION_KEYWORDS.items():
+            if key in skip_keys:
+                continue
             if any(k in low for k in keywords):
                 return key
         return None

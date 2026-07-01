@@ -48,10 +48,10 @@ AGENT_MISSION_BY_VERTICAL: dict[str, str] = {
         "handle objections briefly, and aim to book a meeting or agreed follow-up."
     ),
     "COLLECTIONS": (
-        "Collections call: verify you are speaking with the right account holder; "
-        "reference account context professionally; work toward a clear promise-to-pay "
-        "with specific amount and date when possible. Be empathetic and compliant. "
-        "Do not upsell or pitch unrelated products."
+        "Collections call: confirm you are speaking with the contact by name "
+        "(e.g. Am I speaking with [name]?); reference account context professionally; "
+        "work toward a clear promise-to-pay with specific amount and date when possible. "
+        "Be empathetic and compliant. Do not upsell or pitch unrelated products."
     ),
     "REMINDER": (
         "Appointment reminder call: confirm the upcoming appointment, or help reschedule "
@@ -101,6 +101,17 @@ def get_vertical_close_goal(vertical: str | None) -> str:
 def vertical_allows_meeting_slots(vertical: str | None) -> bool:
     """Only Sales campaigns may offer calendar meeting slots."""
     return normalize_campaign_vertical(vertical) in VERTICALS_WITH_MEETING_SLOTS
+
+
+def vertical_uses_sales_objection_hangup(vertical: str | None) -> bool:
+    """Only Sales auto-hangs up after max objection attempts."""
+    return normalize_campaign_vertical(vertical) == "SALES"
+
+
+# Collections: ignore soft-timing objections — stay on payment clarification
+COLLECTIONS_SKIP_OBJECTION_KEYS: frozenset[str] = frozenset(
+    {"busy_now", "send_email"}
+)
 
 
 def build_call_end_instructions(vertical: str | None) -> str:
@@ -213,10 +224,17 @@ def greeting_instructions(vertical: str, cfg: dict) -> str:
             "- Ask if now is okay for 2 quick questions"
         )
     if vertical == "COLLECTIONS":
+        lead_name = (cfg.get("name") or "").strip()
+        identity_line = (
+            f'- End with a direct identity check using their name: "Am I speaking with {lead_name}?"'
+            if lead_name
+            else "- Ask if you are speaking with the account holder (use their name if known from context)"
+        )
         return (
             f"- Introduce yourself professionally from {company}\n"
             "- State this is regarding an account matter (do not threaten)\n"
-            "- Ask if you are speaking with the right person"
+            f"{identity_line}\n"
+            "- Do NOT say \"the right person\" — use the lead's name in the question"
         )
     if vertical == "RENEWAL":
         return (

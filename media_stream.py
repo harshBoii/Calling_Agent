@@ -126,6 +126,10 @@ async def run_media_stream(
     session: ConversationSession | None = None
     if call_cfg.get("agent_config"):
         session = ConversationSession(call_cfg)
+        print(
+            f"[{call_sid}] campaign_vertical={session.campaign_vertical()}",
+            flush=True,
+        )
         if call_cfg.get("_ai_disclosure_done"):
             session.ai_disclosure_done = True
     duration_timer: asyncio.Task | None = None
@@ -253,7 +257,10 @@ async def run_media_stream(
                 return
 
             objection_hint = session.handle_objection(user_text)
-            if session.objection_attempts >= session._max_objection_attempts():
+            if (
+                session.uses_sales_objection_hangup()
+                and session.objection_attempts >= session._max_objection_attempts()
+            ):
                 soft_line = session._soft_close_line()
                 session.escalation_reason = "failed_objection_handles"
                 await _speak_and_maybe_hangup(soft_line, "no_interest")
