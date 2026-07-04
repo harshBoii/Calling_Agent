@@ -390,6 +390,14 @@ async def run_media_stream(
         """
         nonlocal hangup_requested
 
+        # Clear any lingering barge-in signal from the user's speech that
+        # triggered this turn. The event being set at this point means the user
+        # interrupted the *previous* agent reply — we've already captured their
+        # utterance via STT. If we don't clear it here, ask_llm_stream sees it
+        # immediately and breaks before yielding a single token.
+        # (Mirrors the barge_in_event.clear() at the top of send_audio().)
+        barge_in_event.clear()
+
         max_sentences = session._max_sentences() if session else 99
         sentence_count = 0
         full_spoken = ""
