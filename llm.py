@@ -562,7 +562,7 @@ async def ask_llm_stream(
     print(f"[LLM_STREAM/{provider}] model={model}", flush=True)
 
     BOUNDARIES = frozenset(".?!")   # comma deliberately excluded — see docstring
-    MIN_CHUNK_CHARS = 20            # avoid yielding trivially short phrases
+    MIN_CHUNK_CHARS = 20            # minimum buffer length before we consider yielding
 
     buffer = ""
     produced_anything = False
@@ -574,10 +574,23 @@ async def ask_llm_stream(
             if stop_event and stop_event.is_set():
                 break
             buffer += token
-            if any(ch in buffer for ch in BOUNDARIES) and len(buffer) >= MIN_CHUNK_CHARS:
-                produced_anything = True
-                yield buffer.strip()
-                buffer = ""
+
+            # Extract all complete phrases from the buffer.
+            # We yield at the FIRST sentence boundary (.?!) once the buffer is
+            # long enough — then put the remainder back for the next phrase.
+            # This prevents large Claude tokens from creating 8-second audio
+            # blobs that make barge-in feel unresponsive.
+            while len(buffer) >= MIN_CHUNK_CHARS:
+                boundary_pos = next(
+                    (i for i, ch in enumerate(buffer) if ch in BOUNDARIES), -1
+                )
+                if boundary_pos < 0:
+                    break   # no boundary yet — keep accumulating tokens
+                phrase = buffer[: boundary_pos + 1].strip()
+                buffer = buffer[boundary_pos + 1 :].lstrip()
+                if phrase:
+                    produced_anything = True
+                    yield phrase
 
         # Yield any remaining text that didn't end with a boundary character
         if buffer.strip() and (not stop_event or not stop_event.is_set()):
