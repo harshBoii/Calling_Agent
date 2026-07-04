@@ -33,7 +33,7 @@ from config import (
     to_sarvam_lang,
 )
 from intent_detection import build_intent_context, detect_intents
-from llm import CLAUDE_SILENCE_USER_CUE, LLM_FALLBACK_REPLY, ask_llm
+from llm import CLAUDE_SILENCE_USER_CUE, LLM_FALLBACK_REPLY, ask_llm, ask_llm_stream
 from tts import sarvam_text_to_mp3_chunks, text_to_audio_chunks
 from webhook import send_call_completed_webhook, send_call_status_webhook
 
@@ -270,37 +270,27 @@ async def run_media_stream(
     async def _handle_silence_nudge() -> None:
         nonlocal silence_handling
         silence_handling = True
+        silence_hint = (
+            "\n\n## Silence\n"
+            "The user has been silent for several seconds. In one short sentence, "
+            "check they are still on the line and continue the conversation toward "
+            "the current goal."
+        )
         try:
-            silence_hint = (
-                "\n\n## Silence\n"
-                "The user has been silent for several seconds. In one short sentence, "
-                "check they are still on the line and continue the conversation toward "
-                "the current goal."
-            )
+            # Build the prompt only — no I/O here so the try block is fast
             if session:
                 turn_prompt = session.build_turn_prompt(base_system_prompt) + silence_hint
-                agent_reply = await ask_llm(
-                    conversation_history,
-                    turn_prompt,
-                    llm_provider,
-                    llm_model,
-                    trailing_user_cue=CLAUDE_SILENCE_USER_CUE,
-                )
-                agent_reply = session.enforce_reply(agent_reply)
-                session.stage_turn_count += 1
-                session.sync_to_cfg()
             else:
-                agent_reply = await ask_llm(
-                    conversation_history,
-                    system_prompt + silence_hint,
-                    llm_provider,
-                    llm_model,
-                    trailing_user_cue=CLAUDE_SILENCE_USER_CUE,
-                )
+                turn_prompt = system_prompt + silence_hint
         finally:
+            # Must be False before _stream_speak so the silence timer can arm
+            # normally after TTS finishes playing the nudge phrase.
             silence_handling = False
 
-        await _speak_and_maybe_hangup(agent_reply)
+        await _stream_speak(turn_prompt, trailing_user_cue=CLAUDE_SILENCE_USER_CUE)
+        if session:
+            session.stage_turn_count += 1
+            session.sync_to_cfg()
         print(f"[{call_sid}] 📤 Silence nudge complete — waiting for user", flush=True)
 
     async def _on_silence_timeout(elapsed_at_fire: float | None = None) -> None:
@@ -378,6 +368,138 @@ async def run_media_stream(
         if should_hangup and reason:
             await _cancel_silence_timer("hangup")
             await _hangup_call(reason)
+
+    async def _stream_speak(
+        prompt: str,
+        *,
+        trailing_user_cue: str | None = None,
+    ) -> str:
+        """
+        Stream the LLM response phrase-by-phrase directly to TTS.
+
+        Each phrase is dispatched to send_audio() the moment the LLM produces
+        it, overlapping generation and synthesis for lower first-audio latency.
+
+        Handles:
+        - Barge-in contract: only text audibly delivered is appended to history
+        - <<HANGUP>> marker: dual-layer (per-chunk + post-loop belt-and-suspenders)
+        - Max-sentences guardrail: stops streaming once session limit is reached
+        - Collections hangup gate and evaluate_hangup_confidence on final text
+
+        Returns full_spoken — the text that was audibly delivered to the caller.
+        """
+        nonlocal hangup_requested
+
+        max_sentences = session._max_sentences() if session else 99
+        sentence_count = 0
+        full_spoken = ""
+        marker_found = False   # tracks whether <<HANGUP>> appeared anywhere
+        pending_hangup = False
+        pending_reason: str | None = None
+
+        try:
+            async for phrase in ask_llm_stream(
+                conversation_history,
+                prompt,
+                llm_provider,
+                llm_model,
+                stop_event=barge_in_event,
+                trailing_user_cue=trailing_user_cue,
+            ):
+                if barge_in_event.is_set():
+                    print(
+                        f"[{call_sid}] ⚡ Barge-in during LLM stream — stopping phrase loop",
+                        flush=True,
+                    )
+                    break
+
+                # Per-chunk HANGUP detection
+                phrase_clean, chunk_hangup = parse_agent_reply(phrase)
+                if chunk_hangup:
+                    marker_found = True
+                    pending_hangup = True
+                    pending_reason = "agent_confident_end"
+
+                if not phrase_clean.strip():
+                    continue
+                if phrase_clean.strip() == LLM_FALLBACK_REPLY:
+                    print(
+                        f"[{call_sid}] ⚠️ LLM fallback in stream — skipping phrase",
+                        flush=True,
+                    )
+                    continue
+
+                await send_audio(phrase_clean)
+                full_spoken += phrase_clean + " "
+
+                # Count sentence-ending punctuation for max_sentences guardrail
+                sentence_count += sum(1 for ch in phrase_clean if ch in ".?!")
+                if sentence_count >= max_sentences:
+                    print(
+                        f"[{call_sid}] ✂️ max_sentences={max_sentences} reached — stopping stream",
+                        flush=True,
+                    )
+                    break
+
+                if pending_hangup:
+                    break  # Speak goodbye phrase then stop
+
+        except Exception as e:
+            import traceback as _tb
+            print(f"[{call_sid}] _stream_speak error: {type(e).__name__}: {e}", flush=True)
+            print(_tb.format_exc(), flush=True)
+
+        full_spoken = full_spoken.strip()
+
+        # ── Belt-and-suspenders: check assembled text for a straddled marker ──
+        # Catches the edge case where the sentence-boundary flush split <<HANGUP>>
+        # across two chunks so the per-chunk check missed it.
+        if full_spoken:
+            spoken_clean, belt_hangup = parse_agent_reply(full_spoken)
+            if belt_hangup:
+                full_spoken = spoken_clean.strip()
+                marker_found = True
+                if not pending_hangup:
+                    pending_hangup = True
+                    pending_reason = "agent_confident_end"
+
+        # ── Collections hangup gate ────────────────────────────────────────────
+        if session:
+            full_spoken, pending_hangup = apply_collections_hangup_gate(
+                session, full_spoken, pending_hangup
+            )
+
+        # ── Evaluate hangup confidence (goodbyes, stage completion, etc.) ──────
+        if not pending_hangup:
+            if session:
+                pending_hangup, pending_reason = evaluate_hangup_confidence(
+                    session, full_spoken, marker_found
+                )
+            elif marker_found:
+                pending_hangup = True
+                pending_reason = "agent_confident_end"
+
+        # ── Append ONLY what was audibly delivered to conversation history ──────
+        # On barge-in, full_spoken is the partial text the user actually heard.
+        # We never append unspoken LLM output — doing so causes hallucinated
+        # continuity where the next turn references things the agent never said.
+        if full_spoken and full_spoken != LLM_FALLBACK_REPLY:
+            conversation_history.append({"role": "assistant", "content": full_spoken})
+        else:
+            print(
+                f"[{call_sid}] ⚠️ LLM stream: nothing/fallback spoken — omitted from history",
+                flush=True,
+            )
+
+        turns.append({"role": "agent", "text": full_spoken or "", "ts": _ts()})
+        print(f"[{call_sid}] 🤖 [{llm_provider}] Agent (streamed): {full_spoken}", flush=True)
+
+        # ── Trigger hangup if signaled ─────────────────────────────────────────
+        if pending_hangup and pending_reason and not hangup_requested:
+            await _cancel_silence_timer("hangup")
+            await _hangup_call(pending_reason)
+
+        return full_spoken
 
     async def _check_and_handle_voicemail(text: str) -> bool:
         nonlocal connected
@@ -472,22 +594,15 @@ async def run_media_stream(
                 turn_prompt += (
                     f"\n\n## Objection detected\nUse this guidance: {objection_hint}"
                 )
-            agent_reply = await ask_llm(
-                conversation_history, turn_prompt, llm_provider, llm_model
-            )
-            agent_reply = session.enforce_reply(agent_reply)
+            await _stream_speak(turn_prompt)
             session.stage_turn_count += 1
             session.sync_to_cfg()
-            await _speak_and_maybe_hangup(agent_reply)
             print(
                 f"[{call_sid}] 📤 User turn handled — waiting for user response",
                 flush=True,
             )
         else:
-            agent_reply = await ask_llm(
-                conversation_history, system_prompt, llm_provider, llm_model
-            )
-            await _speak_and_maybe_hangup(agent_reply)
+            await _stream_speak(system_prompt)
             print(
                 f"[{call_sid}] 📤 User turn handled — waiting for user response",
                 flush=True,

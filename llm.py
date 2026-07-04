@@ -452,6 +452,148 @@ async def ask_llm(
         return LLM_FALLBACK_REPLY
 
 
+# ── Streaming LLM (phrase-by-phrase for real-time TTS) ────────────────────────
+
+async def _stream_tokens(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    conversation_history: list,
+    *,
+    trailing_user_cue: str | None = None,
+):
+    """
+    Private async generator: yields raw text tokens from the LLM stream.
+
+    Claude uses the messages.stream() context manager.
+    OpenAI and Groq use stream=True on chat.completions.create().
+    Gemini and Sarvam have no clean streaming SDK — they fall back to a single
+    full-reply yield via ask_llm(), transparent to the caller.
+    """
+    if provider == "claude":
+        if not claude_client:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        claude_messages = prepare_claude_messages(
+            conversation_history, trailing_user_cue=trailing_user_cue
+        )
+        kwargs: dict = dict(
+            model=model,
+            system=system_prompt,
+            messages=claude_messages,
+            max_tokens=4000,
+        )
+        if not _claude_temperature_deprecated(model):
+            kwargs["temperature"] = 0.7
+        async with claude_client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield text
+
+    elif provider == "openai":
+        if not openai_client:
+            raise ValueError("OPENAI_API_KEY not set")
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history,
+            temperature=0.7,
+            stream=True,
+        )
+        async for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    elif provider == "groq":
+        if not groq_client:
+            raise ValueError("GROQ_API_KEY not set")
+        response = await groq_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history,
+            temperature=0.7,
+            max_tokens=150,
+            stream=True,
+        )
+        async for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    else:
+        # Gemini, Sarvam: no clean streaming SDK — single full-reply yield
+        print(f"[LLM_STREAM/{provider}] No native streaming — falling back to ask_llm", flush=True)
+        full = await ask_llm(
+            conversation_history,
+            system_prompt,
+            provider,
+            model,
+            trailing_user_cue=trailing_user_cue,
+        )
+        if full:
+            yield full
+
+
+async def ask_llm_stream(
+    conversation_history: list,
+    system_prompt: str,
+    provider: str,
+    model: str,
+    *,
+    stop_event: asyncio.Event | None = None,
+    trailing_user_cue: str | None = None,
+):
+    """
+    Public async generator: streams the LLM response as natural phrase-sized chunks.
+
+    Buffers incoming tokens until a sentence boundary (.?!) is hit, then yields
+    the accumulated phrase. Comma is intentionally excluded as a boundary —
+    splitting on commas fragments sentences into many short TTS calls, losing
+    cross-clause intonation and negating the latency gain from per-request overhead.
+
+    Stops early if stop_event is set (barge-in by the caller).
+    For non-streaming providers (Gemini, Sarvam), falls back to a single yield of
+    the full response — completely transparent to the caller.
+
+    Yields LLM_FALLBACK_REPLY as a single chunk if the stream errors before
+    producing any text.
+    """
+    provider = (provider or DEFAULT_LLM_PROVIDER).strip().lower()
+    model = model or DEFAULT_LLM_MODELS.get(provider, DEFAULT_LLM_MODELS[DEFAULT_LLM_PROVIDER])
+
+    print(f"[LLM_STREAM/{provider}] model={model}", flush=True)
+
+    BOUNDARIES = frozenset(".?!")   # comma deliberately excluded — see docstring
+    MIN_CHUNK_CHARS = 20            # avoid yielding trivially short phrases
+
+    buffer = ""
+    produced_anything = False
+    try:
+        async for token in _stream_tokens(
+            provider, model, system_prompt, conversation_history,
+            trailing_user_cue=trailing_user_cue,
+        ):
+            if stop_event and stop_event.is_set():
+                break
+            buffer += token
+            if any(ch in buffer for ch in BOUNDARIES) and len(buffer) >= MIN_CHUNK_CHARS:
+                produced_anything = True
+                yield buffer.strip()
+                buffer = ""
+
+        # Yield any remaining text that didn't end with a boundary character
+        if buffer.strip() and (not stop_event or not stop_event.is_set()):
+            produced_anything = True
+            yield buffer.strip()
+
+    except Exception as e:
+        import traceback as _tb
+        print(f"[LLM_STREAM/{provider}] Error: {type(e).__name__}: {e}", flush=True)
+        print(_tb.format_exc(), flush=True)
+
+    # Yield fallback only if the stream errored before producing any output
+    if not produced_anything and (not stop_event or not stop_event.is_set()):
+        yield LLM_FALLBACK_REPLY
+
+
 # --- Transcript analysis (webhook): needs room for structured JSON, not 150 tokens ---
 _ANALYSIS_MAX_TOKENS = 2048
 _ANALYSIS_TEMPERATURE = 0.2
