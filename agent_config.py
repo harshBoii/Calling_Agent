@@ -128,14 +128,45 @@ _SLOT_ORDINALS = [
 HANGUP_MARKER = "<<HANGUP>>"
 
 _GOODBYE_PHRASES = [
+    # Explicit farewells
     "goodbye",
     "good bye",
     "bye",
     "take care",
     "have a great day",
+    "have a wonderful day",
+    "have a good day",
+    "have a nice day",
     "thank you for your time",
+    "thanks for your time",
     "talk soon",
     "speak soon",
+    # Natural AI-generated closings Haiku commonly produces
+    "wishing you the best",
+    "all the best",
+    "we'll be in touch",
+    "we'll connect",
+    "we will connect",
+    "we'll get back to you",
+    "we will get back to you",
+    "our team will get back to you",
+    "our team will get back to you",
+    "our team will reach you",
+    "our team will reach out to you",
+    "looking forward to connecting",
+    "looking forward to speaking",
+    "i'll let you go",
+    "i will let you go",
+    "have a good one",
+    "take it easy",
+    "best of luck",
+    "it was great speaking",
+    "it was nice speaking",
+    "it was great talking",
+    "it was nice talking",
+    "have a lovely",
+    "enjoy your",
+    "you take care",
 ]
 
 
@@ -266,20 +297,25 @@ def evaluate_hangup_confidence(session: "ConversationSession", spoken: str, mark
         return True, "agent_confident_end"
 
     low = spoken.lower()
+
+    # In the close stage, any goodbye-flavoured phrase is enough to end
     if session.current_stage_key == "close":
-        if marker_hangup or any(p in low for p in _GOODBYE_PHRASES):
+        if any(p in low for p in _GOODBYE_PHRASES):
             return True, "conversation_complete"
 
+    # Booking confirmed → end as soon as the agent acknowledges it
     if session.booking_confirmed and session.current_stage_key in ("confirmation", "close"):
         if any(p in low for p in _GOODBYE_PHRASES):
             return True, "booking_confirmed"
 
+    # Objection limit reached → end
     if (
         session.uses_sales_objection_hangup()
         and session.objection_attempts >= session._max_objection_attempts()
     ):
         return True, "no_interest"
 
+    # After even a single no-interest signal with any closing language → end
     if session.no_interest_streak >= 2 and any(
         p in low for p in _GOODBYE_PHRASES + ["understand", "no problem", "thanks"]
     ):

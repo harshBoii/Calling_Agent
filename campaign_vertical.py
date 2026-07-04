@@ -168,14 +168,21 @@ Never use {HANGUP_MARKER} while payment details are still unclear."""
     if key == "SALES":
         return f"""## Ending the call
 Primary close goal: {goal}.
-When meeting is confirmed, clear mutual goodbye, or no interest after objection handling — give a brief polite closing line and append {HANGUP_MARKER} at the very end (after your spoken words).
-Only use {HANGUP_MARKER} when you are ready to end the call. Do not use it mid-conversation."""
+YOU decide when the call is over — do not wait for the user to say goodbye.
+End the call (append {HANGUP_MARKER}) immediately when ANY of these are true:
+- Meeting or follow-up is confirmed → thank them warmly and close.
+- Lead clearly has no interest after 1-2 objection handles → soft close and end.
+- Lead says they are busy, will call back, or asks you to stop → acknowledge and end.
+- You have covered your discovery questions and pitched the offer → wrap up naturally.
+Do NOT keep the conversation going just to be polite. A confident, timely close is professional.
+Give a brief 1-sentence closing line, then append {HANGUP_MARKER} immediately after."""
 
     return f"""## Ending the call
 Primary close goal: {goal}.
 Do NOT offer calendar meeting slots or schedule sales demos.
-When the call objective is met or the contact clearly declines — give a brief polite closing line and append {HANGUP_MARKER} at the very end.
-Only use {HANGUP_MARKER} when you are ready to end the call."""
+YOU decide when the call is over — do not wait for the user to say goodbye.
+End the call (append {HANGUP_MARKER}) when the objective is met OR the contact clearly declines.
+Give a brief 1-sentence closing line, then append {HANGUP_MARKER} immediately after."""
 
 
 # Marker used in build_call_end_instructions (imported by agent_config at runtime)
