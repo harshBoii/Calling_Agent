@@ -157,13 +157,17 @@ async def run_media_stream(
     transcript_buffer: list[str] = []
     stream_id: str | None = None
 
-    # ── Barge-in state ─────────────────────────────────────────────────────────
+    # ── Barge-in & playback state ──────────────────────────────────────────────
     # Use asyncio.Event so setting it from receive_from_telnyx() wakes up
     # the send_audio() coroutine between chunks without polling.
     agent_speaking = False
+    playback_pending = False   # chunks sent; Telnyx still playing queued audio
+    playback_done = asyncio.Event()
+    playback_done.set()        # idle until first send_audio
     barge_in_event = asyncio.Event()   # set = user is speaking → stop TTS
     speech_task: asyncio.Task | None = None  # intro, user turn, or nudge in flight
     turn_dispatch_lock = asyncio.Lock()
+    PLAYBACK_WAIT_TIMEOUT_SEC = 120.0
 
     started_at: dt.datetime | None = None
     ended_at: dt.datetime | None = None
@@ -183,11 +187,65 @@ async def run_media_stream(
             return True
         return dt.datetime.now(dt.timezone.utc) >= greeting_barge_guard_until
 
+    def _agent_audible() -> bool:
+        """True while the caller may still hear agent audio (sending or playing)."""
+        return agent_speaking or playback_pending
+
+    async def clear_stream() -> None:
+        """Tell Telnyx to discard its audio buffer (barge-in / new turn)."""
+        try:
+            await websocket.send_text(json.dumps({"event": "clear"}))
+        except Exception:
+            pass
+
+    async def _wait_for_playback(timeout: float | None = None) -> bool:
+        """Block until Telnyx echoes agent_done (playback caught up to mark)."""
+        if playback_done.is_set():
+            return True
+        try:
+            await asyncio.wait_for(
+                playback_done.wait(),
+                timeout=timeout or PLAYBACK_WAIT_TIMEOUT_SEC,
+            )
+            return True
+        except asyncio.TimeoutError:
+            print(
+                f"[{call_sid}] ⚠️ Playback wait timed out "
+                f"after {timeout or PLAYBACK_WAIT_TIMEOUT_SEC}s",
+                flush=True,
+            )
+            return False
+
+    async def _on_playback_done(source: str = "mark") -> None:
+        """Telnyx finished playing audio up to the agent_done mark."""
+        nonlocal agent_speaking, playback_pending
+        if not playback_pending:
+            print(f"[{call_sid}] ⏭ Ignoring stale agent_done mark", flush=True)
+            return
+        agent_speaking = False
+        playback_pending = False
+        playback_done.set()
+        print(f"[{call_sid}] 🔊 Playback done ({source})", flush=True)
+        await _arm_silence_timer("agent_done")
+
+    async def _flush_playback_queue(reason: str) -> None:
+        """Drop any audio still queued on Telnyx before starting a new utterance."""
+        nonlocal agent_speaking, playback_pending
+        if not _agent_audible() and playback_done.is_set():
+            return
+        print(f"[{call_sid}] 🧹 Flushing Telnyx playback queue ({reason})", flush=True)
+        await clear_stream()
+        agent_speaking = False
+        playback_pending = False
+        playback_done.set()
+
     async def _interrupt_agent_speech(reason: str = "barge-in") -> None:
         """Stop TTS/LLM playback immediately and cancel any in-flight speech task."""
-        nonlocal agent_speaking, speech_task
+        nonlocal agent_speaking, speech_task, playback_pending
         barge_in_event.set()
         agent_speaking = False
+        playback_pending = False
+        playback_done.set()
         await clear_stream()
         if speech_task and not speech_task.done():
             print(f"[{call_sid}] ⚡ Cancelling speech task ({reason})", flush=True)
@@ -211,6 +269,8 @@ async def run_media_stream(
         async with turn_dispatch_lock:
             if speech_task and not speech_task.done():
                 await _interrupt_agent_speech("new_user_turn")
+            elif _agent_audible() or not playback_done.is_set():
+                await _flush_playback_queue("new_user_turn")
             barge_in_event.clear()
             await _run_speech(_handle_user_turn(user_text))
 
@@ -259,7 +319,7 @@ async def run_media_stream(
         if not _silence_watch_active():
             print(f"[{call_sid}] 🔇 Silence watch skipped — call inactive", flush=True)
             return
-        if agent_speaking:
+        if _agent_audible():
             print(f"[{call_sid}] 🔇 Silence watch skipped — agent speaking", flush=True)
             return
         if silence_handling:
@@ -282,7 +342,7 @@ async def run_media_stream(
             try:
                 while True:
                     await asyncio.sleep(0.25)
-                    if not _silence_watch_active() or agent_speaking or silence_handling:
+                    if not _silence_watch_active() or _agent_audible() or silence_handling:
                         return
                     elapsed = _silence_elapsed_sec()
                     whole = int(elapsed)
@@ -328,14 +388,14 @@ async def run_media_stream(
 
     async def _on_silence_timeout(elapsed_at_fire: float | None = None) -> None:
         nonlocal silence_nudge_count
-        if not _silence_watch_active() or agent_speaking or silence_handling:
+        if not _silence_watch_active() or _agent_audible() or silence_handling:
             return
 
         elapsed = elapsed_at_fire if elapsed_at_fire is not None else _silence_elapsed_sec()
         silence_nudge_count += 1
         print(
             f"[{call_sid}] 🔇 Silence threshold reached: {elapsed:.1f}s "
-            f"(nudge {silence_nudge_count}/{MAX_CONSECUTIVE_SILENCE_NUDGES}) — agent speaking",
+            f"(nudge {silence_nudge_count}/{MAX_CONSECUTIVE_SILENCE_NUDGES})",
             flush=True,
         )
         await _cancel_silence_timer("timeout")
@@ -437,6 +497,7 @@ async def run_media_stream(
         marker_found = False   # tracks whether <<HANGUP>> appeared anywhere
         pending_hangup = False
         pending_reason: str | None = None
+        first_phrase = True
 
         try:
             async for phrase in ask_llm_stream(
@@ -470,7 +531,8 @@ async def run_media_stream(
                     )
                     continue
 
-                completed = await send_audio(phrase_clean)
+                completed = await send_audio(phrase_clean, clear_queue=first_phrase)
+                first_phrase = False
                 if not completed or barge_in_event.is_set():
                     print(
                         f"[{call_sid}] ⚡ Barge-in during TTS — stopping stream",
@@ -686,12 +748,20 @@ async def run_media_stream(
         override_voice_id: str | None = None,
         *,
         greeting_barge_guard_sec: float | None = None,
+        clear_queue: bool = False,
+        wait_playback: bool = True,
     ) -> bool:
-        """Send TTS audio. Returns False if interrupted by barge-in."""
-        nonlocal agent_speaking, greeting_barge_guard_until
+        """Send TTS audio and optionally wait until Telnyx finishes playing it."""
+        nonlocal agent_speaking, greeting_barge_guard_until, playback_pending
         if barge_in_event.is_set() and _barge_in_allowed():
             print(f"[{call_sid}] ⚡ Barge-in active — skipping TTS", flush=True)
             return False
+
+        if clear_queue:
+            await _flush_playback_queue("clear_before_send")
+        elif playback_pending or not playback_done.is_set():
+            # Prior phrase still playing on the phone — wait before queueing more audio.
+            await _wait_for_playback()
 
         await _cancel_silence_timer("agent_speaking")
         if greeting_barge_guard_sec:
@@ -704,6 +774,8 @@ async def run_media_stream(
                 flush=True,
             )
         agent_speaking = True
+        playback_pending = False
+        playback_done.clear()
         barge_in_event.clear()  # arm: clear any previous interrupt signal
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
@@ -715,10 +787,6 @@ async def run_media_stream(
             tts_stream = text_to_audio_chunks(text, el_model, override_voice_id or voice_id)
 
         async for audio_b64 in tts_stream:
-            # ── Barge-in check BEFORE sending each chunk ──────────────────────
-            # Because tts.py now yields small chunks (~250 ms each), this check
-            # fires frequently enough to stop playback almost instantly when the
-            # user starts speaking.
             if barge_in_event.is_set() and _barge_in_allowed():
                 print(f"[{call_sid}] ⚡ Barge-in — discarding remaining TTS chunks", flush=True)
                 await clear_stream()
@@ -739,33 +807,40 @@ async def run_media_stream(
                 print(f"[{call_sid}] Send error: {e}", flush=True)
                 break
 
-        # Only send the mark if we weren't interrupted (avoids a spurious
-        # agent_done mark confusing the STT state machine).
-        if not interrupted and not barge_in_event.is_set():
-            try:
-                await websocket.send_text(
-                    json.dumps({"event": "mark", "mark": {"name": "agent_done"}})
-                )
-            except Exception:
-                pass
+        if interrupted or barge_in_event.is_set():
+            agent_speaking = False
+            playback_pending = False
+            playback_done.set()
+            print(
+                f"[{call_sid}] ✅ Sent {chunk_count} chunks (interrupted=True)",
+                flush=True,
+            )
+            return False
 
-        agent_speaking = False
+        # Mark is echoed by Telnyx only after queued audio up to this point has played.
+        playback_pending = True
+        try:
+            await websocket.send_text(
+                json.dumps({"event": "mark", "mark": {"name": "agent_done"}})
+            )
+        except Exception:
+            agent_speaking = False
+            playback_pending = False
+            playback_done.set()
+            return False
+
         print(
-            f"[{call_sid}] ✅ Sent {chunk_count} chunks "
-            f"(interrupted={interrupted or barge_in_event.is_set()})",
+            f"[{call_sid}] ✅ Sent {chunk_count} chunks — waiting for playback",
             flush=True,
         )
-        if not interrupted and not barge_in_event.is_set():
-            await _arm_silence_timer("agent_done")
-        return not interrupted and not barge_in_event.is_set()
 
-    # ── Clear helper ───────────────────────────────────────────────────────────
-    async def clear_stream() -> None:
-        """Tell Telnyx to discard its audio buffer (barge-in)."""
-        try:
-            await websocket.send_text(json.dumps({"event": "clear"}))
-        except Exception:
-            pass
+        if wait_playback:
+            if not await _wait_for_playback():
+                agent_speaking = False
+                playback_pending = False
+                playback_done.set()
+                return False
+        return True
 
     # ── Telnyx receiver ────────────────────────────────────────────────────────
     async def receive_from_telnyx() -> None:
@@ -844,7 +919,7 @@ async def run_media_stream(
                             # ── Immediate RMS barge-in ─────────────────────────
                             # This fires BEFORE STT has a chance to produce a
                             # transcript, giving sub-100 ms interrupt latency.
-                            if agent_speaking and _barge_in_allowed():
+                            if _agent_audible() and _barge_in_allowed():
                                 try:
                                     pcm = audioop.ulaw2lin(ulaw, 2)
                                     rms = audioop.rms(pcm, 2)
@@ -870,6 +945,7 @@ async def run_media_stream(
                     mark_name = (data.get("mark") or {}).get("name", "")
                     print(f"[{call_sid}] Mark: {mark_name}", flush=True)
                     if mark_name == "agent_done":
+                        await _on_playback_done("mark")
                         elapsed = _silence_elapsed_sec()
                         if elapsed > 0:
                             print(
@@ -930,10 +1006,10 @@ async def run_media_stream(
 
                             # STT-level barge-in (fires after RMS already did, but
                             # handles the case where RMS missed a quiet start).
-                            if agent_speaking and _barge_in_allowed():
+                            if _agent_audible() and _barge_in_allowed():
                                 print(f"[{call_sid}] ⚡ STT barge-in (Deepgram)", flush=True)
                                 await _interrupt_agent_speech("stt")
-                            elif agent_speaking and not _barge_in_allowed():
+                            elif _agent_audible() and not _barge_in_allowed():
                                 continue
 
                             if is_final:
@@ -1016,7 +1092,7 @@ async def run_media_stream(
                             # speech_start fires as soon as Sarvam detects voice —
                             # use it as a barge-in signal (faster than waiting for data).
                             if msg_type == "speech_start":
-                                if agent_speaking and _barge_in_allowed():
+                                if _agent_audible() and _barge_in_allowed():
                                     print(
                                         f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)",
                                         flush=True,
@@ -1030,10 +1106,10 @@ async def run_media_stream(
                                 if not transcript:
                                     continue
 
-                                # Catch any remaining agent_speaking state missed by RMS/speech_start.
-                                if agent_speaking and _barge_in_allowed():
+                                # Catch any remaining playback missed by RMS/speech_start.
+                                if _agent_audible() and _barge_in_allowed():
                                     await _interrupt_agent_speech("stt")
-                                elif agent_speaking and not _barge_in_allowed():
+                                elif _agent_audible() and not _barge_in_allowed():
                                     continue
 
                                 print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
