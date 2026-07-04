@@ -736,7 +736,8 @@ Goal: {stage.get('goal')}
 Exit when: {stage.get('exitCondition')}
 Turns used: {self.stage_turn_count}/{stage.get('maxTurns', 2)} (remaining: {remaining})
 Off-script behavior: {self.off_script_behavior}{slot_hint}
-Focus ONLY on this stage goal for your next reply."""
+Focus on this stage goal, but IMPORTANT: DO NOT repeat questions or phrases you have already used. 
+Acknowledge the user's last statement and naturally pivot."""
 
         return f"{base_prompt}\n\n{stage_block}"
 
