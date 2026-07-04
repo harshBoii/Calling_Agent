@@ -1,6 +1,7 @@
 """LLM clients, greeting generation, and provider routing."""
 
 import asyncio
+import contextlib
 import re
 
 import anthropic
@@ -461,6 +462,7 @@ async def _stream_tokens(
     conversation_history: list,
     *,
     trailing_user_cue: str | None = None,
+    stop_event: asyncio.Event | None = None,
 ):
     """
     Private async generator: yields raw text tokens from the LLM stream.
@@ -521,13 +523,36 @@ async def _stream_tokens(
     else:
         # Gemini, Sarvam: no clean streaming SDK — single full-reply yield
         print(f"[LLM_STREAM/{provider}] No native streaming — falling back to ask_llm", flush=True)
-        full = await ask_llm(
-            conversation_history,
-            system_prompt,
-            provider,
-            model,
-            trailing_user_cue=trailing_user_cue,
+        full_task = asyncio.create_task(
+            ask_llm(
+                conversation_history,
+                system_prompt,
+                provider,
+                model,
+                trailing_user_cue=trailing_user_cue,
+            )
         )
+        stop_wait = (
+            asyncio.create_task(stop_event.wait())
+            if stop_event is not None
+            else None
+        )
+        try:
+            wait_set = {full_task}
+            if stop_wait is not None:
+                wait_set.add(stop_wait)
+            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            if stop_wait is not None and stop_wait in done:
+                full_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await full_task
+                return
+            full = full_task.result()
+        finally:
+            if stop_wait is not None:
+                stop_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stop_wait
         if full:
             yield full
 
@@ -570,6 +595,7 @@ async def ask_llm_stream(
         async for token in _stream_tokens(
             provider, model, system_prompt, conversation_history,
             trailing_user_cue=trailing_user_cue,
+            stop_event=stop_event,
         ):
             if stop_event and stop_event.is_set():
                 break
@@ -581,6 +607,8 @@ async def ask_llm_stream(
             # This prevents large Claude tokens from creating 8-second audio
             # blobs that make barge-in feel unresponsive.
             while len(buffer) >= MIN_CHUNK_CHARS:
+                if stop_event and stop_event.is_set():
+                    return
                 boundary_pos = next(
                     (i for i, ch in enumerate(buffer) if ch in BOUNDARIES), -1
                 )
@@ -589,6 +617,8 @@ async def ask_llm_stream(
                 phrase = buffer[: boundary_pos + 1].strip()
                 buffer = buffer[boundary_pos + 1 :].lstrip()
                 if phrase:
+                    if stop_event and stop_event.is_set():
+                        return
                     produced_anything = True
                     yield phrase
 

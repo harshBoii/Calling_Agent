@@ -162,6 +162,8 @@ async def run_media_stream(
     # the send_audio() coroutine between chunks without polling.
     agent_speaking = False
     barge_in_event = asyncio.Event()   # set = user is speaking → stop TTS
+    speech_task: asyncio.Task | None = None  # intro, user turn, or nudge in flight
+    turn_dispatch_lock = asyncio.Lock()
 
     started_at: dt.datetime | None = None
     ended_at: dt.datetime | None = None
@@ -180,6 +182,37 @@ async def run_media_stream(
         if greeting_barge_guard_until is None:
             return True
         return dt.datetime.now(dt.timezone.utc) >= greeting_barge_guard_until
+
+    async def _interrupt_agent_speech(reason: str = "barge-in") -> None:
+        """Stop TTS/LLM playback immediately and cancel any in-flight speech task."""
+        nonlocal agent_speaking, speech_task
+        barge_in_event.set()
+        agent_speaking = False
+        await clear_stream()
+        if speech_task and not speech_task.done():
+            print(f"[{call_sid}] ⚡ Cancelling speech task ({reason})", flush=True)
+            speech_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await speech_task
+            speech_task = None
+
+    async def _run_speech(coro) -> None:
+        """Track the active intro/response/nudge so barge-in can cancel it."""
+        nonlocal speech_task
+        speech_task = asyncio.current_task()
+        try:
+            await coro
+        finally:
+            if speech_task is asyncio.current_task():
+                speech_task = None
+
+    async def _enqueue_user_turn(user_text: str) -> None:
+        """Handle a user utterance; interrupt any agent speech already in progress."""
+        async with turn_dispatch_lock:
+            if speech_task and not speech_task.done():
+                await _interrupt_agent_speech("new_user_turn")
+            barge_in_event.clear()
+            await _run_speech(_handle_user_turn(user_text))
 
     def _silence_watch_active() -> bool:
         if hangup_requested:
@@ -311,7 +344,7 @@ async def run_media_stream(
             await _speak_and_maybe_hangup(SILENCE_HANGUP_LINE, "no_response")
             return
 
-        await _handle_silence_nudge()
+        await _run_speech(_handle_silence_nudge())
 
     def _ts() -> float:
         if started_at is None:
@@ -437,7 +470,14 @@ async def run_media_stream(
                     )
                     continue
 
-                await send_audio(phrase_clean)
+                completed = await send_audio(phrase_clean)
+                if not completed or barge_in_event.is_set():
+                    print(
+                        f"[{call_sid}] ⚡ Barge-in during TTS — stopping stream",
+                        flush=True,
+                    )
+                    break
+
                 full_spoken += phrase_clean + " "
 
                 # Count sentence-ending punctuation for max_sentences guardrail
@@ -452,6 +492,9 @@ async def run_media_stream(
                 if pending_hangup:
                     break  # Speak goodbye phrase then stop
 
+        except asyncio.CancelledError:
+            print(f"[{call_sid}] ⚡ _stream_speak cancelled", flush=True)
+            raise
         except Exception as e:
             import traceback as _tb
             print(f"[{call_sid}] _stream_speak error: {type(e).__name__}: {e}", flush=True)
@@ -527,94 +570,98 @@ async def run_media_stream(
     async def _handle_user_turn(user_text: str) -> None:
         nonlocal agent_speaking, first_user_turn, silence_nudge_count, user_has_spoken
 
-        await _cancel_silence_timer("user_turn")
-        silence_nudge_count = 0
+        try:
+            await _cancel_silence_timer("user_turn")
+            silence_nudge_count = 0
 
-        if session and session.call_should_end:
-            return
-
-        if first_user_turn:
-            first_user_turn = False
-            if await _check_and_handle_voicemail(user_text):
+            if session and session.call_should_end:
                 return
 
-        user_has_spoken = True
-        print(f"[{call_sid}] 🎤 Human: {user_text}", flush=True)
-        conversation_history.append({"role": "user", "content": user_text})
-        turns.append({"role": "user", "text": user_text, "ts": _ts()})
+            if first_user_turn:
+                first_user_turn = False
+                if await _check_and_handle_voicemail(user_text):
+                    return
 
-        if session:
-            opt_out_line = session.check_compliance_on_user_input(user_text)
-            if opt_out_line:
-                await _speak_and_maybe_hangup(opt_out_line, "opt_out")
-                return
+            user_has_spoken = True
+            print(f"[{call_sid}] 🎤 Human: {user_text}", flush=True)
+            conversation_history.append({"role": "user", "content": user_text})
+            turns.append({"role": "user", "text": user_text, "ts": _ts()})
 
-            escalation_line = session.check_escalation(user_text)
-            if escalation_line:
-                reason = session.escalation_reason or "escalation"
-                await _speak_and_maybe_hangup(escalation_line, reason)
-                return
+            if session:
+                opt_out_line = session.check_compliance_on_user_input(user_text)
+                if opt_out_line:
+                    await _speak_and_maybe_hangup(opt_out_line, "opt_out")
+                    return
 
-            objection_hint = session.handle_objection(user_text)
-            if (
-                session.uses_sales_objection_hangup()
-                and session.objection_attempts >= session._max_objection_attempts()
-            ):
-                soft_line = session._soft_close_line()
-                session.escalation_reason = "failed_objection_handles"
-                await _speak_and_maybe_hangup(soft_line, "no_interest")
-                return
+                escalation_line = session.check_escalation(user_text)
+                if escalation_line:
+                    reason = session.escalation_reason or "escalation"
+                    await _speak_and_maybe_hangup(escalation_line, reason)
+                    return
 
-            if session.allows_meeting_slots():
-                session.ensure_offered_slots()
+                objection_hint = session.handle_objection(user_text)
+                if (
+                    session.uses_sales_objection_hangup()
+                    and session.objection_attempts >= session._max_objection_attempts()
+                ):
+                    soft_line = session._soft_close_line()
+                    session.escalation_reason = "failed_objection_handles"
+                    await _speak_and_maybe_hangup(soft_line, "no_interest")
+                    return
 
-                if session.current_stage_key == "slot_suggestion":
-                    session.detect_slot_selection(user_text)
-                elif session.current_stage_key == "confirmation":
-                    session.detect_slot_selection(user_text)
-                    session.maybe_confirm_booking(user_text)
+                if session.allows_meeting_slots():
+                    session.ensure_offered_slots()
 
-            session.advance_stage(user_text)
+                    if session.current_stage_key == "slot_suggestion":
+                        session.detect_slot_selection(user_text)
+                    elif session.current_stage_key == "confirmation":
+                        session.detect_slot_selection(user_text)
+                        session.maybe_confirm_booking(user_text)
 
-            if (
-                session.allows_meeting_slots()
-                and session.current_stage_key == "slot_suggestion"
-                and not session.offered_slots
-            ):
-                booking = (call_cfg.get("agent_config") or {}).get("bookingClose") or {}
-                source_id = booking.get("calendarSourceId") or "default"
-                count = int(booking.get("slotsToOffer") or 2)
-                session.offered_slots = await default_calendar_provider.get_available_slots(
-                    source_id, count
+                session.advance_stage(user_text)
+
+                if (
+                    session.allows_meeting_slots()
+                    and session.current_stage_key == "slot_suggestion"
+                    and not session.offered_slots
+                ):
+                    booking = (call_cfg.get("agent_config") or {}).get("bookingClose") or {}
+                    source_id = booking.get("calendarSourceId") or "default"
+                    count = int(booking.get("slotsToOffer") or 2)
+                    session.offered_slots = await default_calendar_provider.get_available_slots(
+                        source_id, count
+                    )
+                    session.offered_slot_records = []
+
+                turn_prompt = session.build_turn_prompt(base_system_prompt)
+
+                intents = await asyncio.to_thread(detect_intents, user_text)
+                if intents:
+                    print(f"[{call_sid}] intents={intents}", flush=True)
+                intent_block = build_intent_context(intents, session, call_cfg)
+                if intent_block:
+                    turn_prompt += f"\n\n{intent_block}"
+
+                if objection_hint:
+                    turn_prompt += (
+                        f"\n\n## Objection detected\nUse this guidance: {objection_hint}"
+                    )
+                await _stream_speak(turn_prompt)
+                session.stage_turn_count += 1
+                session.sync_to_cfg()
+                print(
+                    f"[{call_sid}] 📤 User turn handled — waiting for user response",
+                    flush=True,
                 )
-                session.offered_slot_records = []
-
-            turn_prompt = session.build_turn_prompt(base_system_prompt)
-
-            intents = await asyncio.to_thread(detect_intents, user_text)
-            if intents:
-                print(f"[{call_sid}] intents={intents}", flush=True)
-            intent_block = build_intent_context(intents, session, call_cfg)
-            if intent_block:
-                turn_prompt += f"\n\n{intent_block}"
-
-            if objection_hint:
-                turn_prompt += (
-                    f"\n\n## Objection detected\nUse this guidance: {objection_hint}"
+            else:
+                await _stream_speak(system_prompt)
+                print(
+                    f"[{call_sid}] 📤 User turn handled — waiting for user response",
+                    flush=True,
                 )
-            await _stream_speak(turn_prompt)
-            session.stage_turn_count += 1
-            session.sync_to_cfg()
-            print(
-                f"[{call_sid}] 📤 User turn handled — waiting for user response",
-                flush=True,
-            )
-        else:
-            await _stream_speak(system_prompt)
-            print(
-                f"[{call_sid}] 📤 User turn handled — waiting for user response",
-                flush=True,
-            )
+        except asyncio.CancelledError:
+            print(f"[{call_sid}] ⚡ User turn cancelled (barge-in)", flush=True)
+            raise
 
     async def _duration_watchdog() -> None:
         if not session:
@@ -639,8 +686,13 @@ async def run_media_stream(
         override_voice_id: str | None = None,
         *,
         greeting_barge_guard_sec: float | None = None,
-    ) -> None:
+    ) -> bool:
+        """Send TTS audio. Returns False if interrupted by barge-in."""
         nonlocal agent_speaking, greeting_barge_guard_until
+        if barge_in_event.is_set() and _barge_in_allowed():
+            print(f"[{call_sid}] ⚡ Barge-in active — skipping TTS", flush=True)
+            return False
+
         await _cancel_silence_timer("agent_speaking")
         if greeting_barge_guard_sec:
             greeting_barge_guard_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
@@ -655,6 +707,7 @@ async def run_media_stream(
         barge_in_event.clear()  # arm: clear any previous interrupt signal
         print(f"[{call_sid}] 🔊 Speaking: {text[:80]}", flush=True)
         chunk_count = 0
+        interrupted = False
 
         if use_sarvam_tts:
             tts_stream = sarvam_text_to_mp3_chunks(text, sarvam_tts_lang, sarvam_speaker)
@@ -668,6 +721,8 @@ async def run_media_stream(
             # user starts speaking.
             if barge_in_event.is_set() and _barge_in_allowed():
                 print(f"[{call_sid}] ⚡ Barge-in — discarding remaining TTS chunks", flush=True)
+                await clear_stream()
+                interrupted = True
                 break
             if barge_in_event.is_set() and not _barge_in_allowed():
                 barge_in_event.clear()
@@ -686,7 +741,7 @@ async def run_media_stream(
 
         # Only send the mark if we weren't interrupted (avoids a spurious
         # agent_done mark confusing the STT state machine).
-        if not barge_in_event.is_set():
+        if not interrupted and not barge_in_event.is_set():
             try:
                 await websocket.send_text(
                     json.dumps({"event": "mark", "mark": {"name": "agent_done"}})
@@ -695,9 +750,14 @@ async def run_media_stream(
                 pass
 
         agent_speaking = False
-        print(f"[{call_sid}] ✅ Sent {chunk_count} chunks (interrupted={barge_in_event.is_set()})", flush=True)
-        if not barge_in_event.is_set():
+        print(
+            f"[{call_sid}] ✅ Sent {chunk_count} chunks "
+            f"(interrupted={interrupted or barge_in_event.is_set()})",
+            flush=True,
+        )
+        if not interrupted and not barge_in_event.is_set():
             await _arm_silence_timer("agent_done")
+        return not interrupted and not barge_in_event.is_set()
 
     # ── Clear helper ───────────────────────────────────────────────────────────
     async def clear_stream() -> None:
@@ -766,9 +826,12 @@ async def run_media_stream(
                         if rec_msg:
                             await send_audio(rec_msg, override_voice_id=ELEVENLABS_VOICE_ID)
                             await asyncio.sleep(0.5)
-                        await send_audio(opening_greeting, greeting_barge_guard_sec=GREETING_BARGE_IN_GUARD_SEC)
+                        await send_audio(
+                            opening_greeting,
+                            greeting_barge_guard_sec=GREETING_BARGE_IN_GUARD_SEC,
+                        )
 
-                    asyncio.create_task(_play_intro())
+                    asyncio.create_task(_run_speech(_play_intro()))
 
                 elif event == "media":
                     media = data.get("media") or {}
@@ -793,13 +856,11 @@ async def run_media_stream(
                                     )
                                     if cooldown_ok and rms >= barge_in_rms_threshold:
                                         last_barge_in_at = now
-                                        agent_speaking = False
-                                        barge_in_event.set()  # wake up send_audio()
                                         print(
                                             f"[{call_sid}] ⚡ Barge-in detected (rms={rms}) — clearing",
                                             flush=True,
                                         )
-                                        await clear_stream()
+                                        await _interrupt_agent_speech("rms")
                                 except Exception:
                                     pass
 
@@ -870,10 +931,8 @@ async def run_media_stream(
                             # STT-level barge-in (fires after RMS already did, but
                             # handles the case where RMS missed a quiet start).
                             if agent_speaking and _barge_in_allowed():
-                                agent_speaking = False
-                                barge_in_event.set()
                                 print(f"[{call_sid}] ⚡ STT barge-in (Deepgram)", flush=True)
-                                await clear_stream()
+                                await _interrupt_agent_speech("stt")
                             elif agent_speaking and not _barge_in_allowed():
                                 continue
 
@@ -890,7 +949,7 @@ async def run_media_stream(
                                     continue
                                 if session and session.call_should_end:
                                     continue
-                                await _handle_user_turn(full_turn)
+                                asyncio.create_task(_enqueue_user_turn(full_turn))
 
                         except Exception as e:
                             print(f"[{call_sid}] Transcript error: {e}", flush=True)
@@ -958,10 +1017,11 @@ async def run_media_stream(
                             # use it as a barge-in signal (faster than waiting for data).
                             if msg_type == "speech_start":
                                 if agent_speaking and _barge_in_allowed():
-                                    agent_speaking = False
-                                    barge_in_event.set()
-                                    print(f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)", flush=True)
-                                    await clear_stream()
+                                    print(
+                                        f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)",
+                                        flush=True,
+                                    )
+                                    await _interrupt_agent_speech("stt")
 
                             elif msg_type == "data":
                                 data_obj = getattr(message, "data", None)
@@ -972,9 +1032,7 @@ async def run_media_stream(
 
                                 # Catch any remaining agent_speaking state missed by RMS/speech_start.
                                 if agent_speaking and _barge_in_allowed():
-                                    agent_speaking = False
-                                    barge_in_event.set()
-                                    await clear_stream()
+                                    await _interrupt_agent_speech("stt")
                                 elif agent_speaking and not _barge_in_allowed():
                                     continue
 
@@ -986,7 +1044,7 @@ async def run_media_stream(
 
                                 if session and session.call_should_end:
                                     continue
-                                await _handle_user_turn(transcript)
+                                asyncio.create_task(_enqueue_user_turn(transcript))
 
                         except Exception as e:
                             print(f"[{call_sid}] Sarvam transcript error: {e}", flush=True)
