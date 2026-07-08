@@ -290,6 +290,18 @@ async def run_media_stream(
             dt.datetime.now(dt.timezone.utc) - waiting_for_user_since
         ).total_seconds()
 
+    def _should_skip_short_turn(text: str) -> bool:
+        """Skip tiny barge-in fragments; accept one-word replies while waiting."""
+        words = len((text or "").split())
+        if words == 0:
+            return True
+        # Silence watch armed → user is answering after agent finished.
+        # One-word replies ("yes", "haan", "ok") must not be dropped.
+        # Keep the min-word gate only for barge-in / mid-speech fragments.
+        if waiting_for_user_since is not None and not barge_in_event.is_set():
+            return False
+        return words <= MIN_WORDS_TO_RESPOND
+
     async def _cancel_silence_timer(reason: str = "") -> None:
         nonlocal silence_timer_task, waiting_for_user_since, _last_silence_log_sec
         elapsed = _silence_elapsed_sec()
@@ -1020,7 +1032,7 @@ async def run_media_stream(
                             if speech_final and transcript_buffer:
                                 full_turn = " ".join(transcript_buffer)
                                 transcript_buffer.clear()
-                                if len(full_turn.split()) <= MIN_WORDS_TO_RESPOND:
+                                if _should_skip_short_turn(full_turn):
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{full_turn}'", flush=True)
                                     continue
                                 if session and session.call_should_end:
@@ -1114,7 +1126,7 @@ async def run_media_stream(
 
                                 print(f"[{call_sid}] [SARVAM FINAL ✅] {transcript}", flush=True)
 
-                                if len(transcript.split()) <= MIN_WORDS_TO_RESPOND:
+                                if _should_skip_short_turn(transcript):
                                     print(f"[{call_sid}] ⏭ Skipping short turn: '{transcript}'", flush=True)
                                     continue
 
