@@ -161,7 +161,7 @@ SILENCE_HANGUP_LINE = os.environ.get(
     "SILENCE_HANGUP_LINE",
     "It seems like you're caught up — I'll call you back later.",
 )
-GREETING_BARGE_IN_GUARD_SEC = float(os.environ.get("GREETING_BARGE_IN_GUARD_SEC", "3"))
+GREETING_BARGE_IN_GUARD_SEC = float(os.environ.get("GREETING_BARGE_IN_GUARD_SEC", "7"))
 
 QUESTIONS_TO_ASK = """
 
