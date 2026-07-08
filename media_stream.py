@@ -28,6 +28,7 @@ from config import (
     SARVAM_API_KEY,
     GREETING_BARGE_IN_GUARD_SEC,
     POST_GREETING_SHORT_TURNS_TO_ACCEPT,
+    BARGE_IN_COOLDOWN_SEC,
     SILENCE_HANGUP_LINE,
     SILENCE_NUDGE_SEC,
     deepgram_ws_url,
@@ -183,11 +184,19 @@ async def run_media_stream(
     post_greeting_short_accepts_remaining = POST_GREETING_SHORT_TURNS_TO_ACCEPT
     waiting_for_user_since: dt.datetime | None = None
     _last_silence_log_sec = -1
+    last_barge_in_at: dt.datetime | None = None
 
     def _barge_in_allowed() -> bool:
         if greeting_barge_guard_until is None:
             return True
         return dt.datetime.now(dt.timezone.utc) >= greeting_barge_guard_until
+
+    def _barge_in_cooldown_active() -> bool:
+        """True if a recent barge-in should suppress repeat interrupts."""
+        if last_barge_in_at is None:
+            return False
+        elapsed = (dt.datetime.now(dt.timezone.utc) - last_barge_in_at).total_seconds()
+        return elapsed < BARGE_IN_COOLDOWN_SEC
 
     def _agent_audible() -> bool:
         """True while the caller may still hear agent audio (sending or playing)."""
@@ -243,12 +252,21 @@ async def run_media_stream(
 
     async def _interrupt_agent_speech(reason: str = "barge-in") -> None:
         """Stop TTS/LLM playback immediately and cancel any in-flight speech task."""
-        nonlocal agent_speaking, speech_task, playback_pending
+        nonlocal agent_speaking, speech_task, playback_pending, last_barge_in_at
+        if _barge_in_cooldown_active():
+            print(
+                f"[{call_sid}] 🛡️ Barge-in cooldown active "
+                f"({BARGE_IN_COOLDOWN_SEC}s) — ignoring ({reason})",
+                flush=True,
+            )
+            return
+        last_barge_in_at = dt.datetime.now(dt.timezone.utc)
         barge_in_event.set()
         agent_speaking = False
         playback_pending = False
         playback_done.set()
         await clear_stream()
+        print(f"[{call_sid}] ⚡ Barge-in ({reason}) — clearing playback", flush=True)
         if speech_task and not speech_task.done():
             print(f"[{call_sid}] ⚡ Cancelling speech task ({reason})", flush=True)
             speech_task.cancel()
@@ -876,12 +894,10 @@ async def run_media_stream(
     async def receive_from_telnyx() -> None:
         nonlocal stream_id, started_at, connected, agent_speaking, duration_timer, call_control_id
 
-        last_barge_in_at: dt.datetime | None = None
         # ── Tunables ──────────────────────────────────────────────────────────
         # Lower RMS threshold = more sensitive to quiet speech.
         # Raise it if you get false interrupts from background noise.
         barge_in_rms_threshold = 520   # was 700 — lowered for faster response
-        barge_in_cooldown_sec = 0.6    # ignore further triggers for this long
 
         try:
             while True:
@@ -953,18 +969,7 @@ async def run_media_stream(
                                 try:
                                     pcm = audioop.ulaw2lin(ulaw, 2)
                                     rms = audioop.rms(pcm, 2)
-                                    now = dt.datetime.now(dt.timezone.utc)
-                                    cooldown_ok = (
-                                        last_barge_in_at is None
-                                        or (now - last_barge_in_at).total_seconds()
-                                        >= barge_in_cooldown_sec
-                                    )
-                                    if cooldown_ok and rms >= barge_in_rms_threshold:
-                                        last_barge_in_at = now
-                                        print(
-                                            f"[{call_sid}] ⚡ Barge-in detected (rms={rms}) — clearing",
-                                            flush=True,
-                                        )
+                                    if rms >= barge_in_rms_threshold:
                                         await _interrupt_agent_speech("rms")
                                 except Exception:
                                     pass
@@ -1036,7 +1041,11 @@ async def run_media_stream(
 
                             # STT-level barge-in (fires after RMS already did, but
                             # handles the case where RMS missed a quiet start).
-                            if _agent_audible() and _barge_in_allowed():
+                            if (
+                                _agent_audible()
+                                and _barge_in_allowed()
+                                and not _barge_in_cooldown_active()
+                            ):
                                 print(f"[{call_sid}] ⚡ STT barge-in (Deepgram)", flush=True)
                                 await _interrupt_agent_speech("stt")
                             elif _agent_audible() and not _barge_in_allowed():
@@ -1122,7 +1131,11 @@ async def run_media_stream(
                             # speech_start fires as soon as Sarvam detects voice —
                             # use it as a barge-in signal (faster than waiting for data).
                             if msg_type == "speech_start":
-                                if _agent_audible() and _barge_in_allowed():
+                                if (
+                                    _agent_audible()
+                                    and _barge_in_allowed()
+                                    and not _barge_in_cooldown_active()
+                                ):
                                     print(
                                         f"[{call_sid}] ⚡ STT barge-in (Sarvam speech_start)",
                                         flush=True,
@@ -1137,7 +1150,11 @@ async def run_media_stream(
                                     continue
 
                                 # Catch any remaining playback missed by RMS/speech_start.
-                                if _agent_audible() and _barge_in_allowed():
+                                if (
+                                    _agent_audible()
+                                    and _barge_in_allowed()
+                                    and not _barge_in_cooldown_active()
+                                ):
                                     await _interrupt_agent_speech("stt")
                                 elif _agent_audible() and not _barge_in_allowed():
                                     continue
