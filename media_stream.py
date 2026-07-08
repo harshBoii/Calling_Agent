@@ -29,6 +29,7 @@ from config import (
     GREETING_BARGE_IN_GUARD_SEC,
     POST_GREETING_SHORT_TURNS_TO_ACCEPT,
     BARGE_IN_COOLDOWN_SEC,
+    ALWAYS_ACCEPT_SHORT_WORDS,
     SILENCE_HANGUP_LINE,
     SILENCE_NUDGE_SEC,
     deepgram_ws_url,
@@ -42,19 +43,6 @@ from webhook import send_call_completed_webhook, send_call_status_webhook
 _VOICEMAIL_PHRASE = (
     "forwarded to voice mail the person you are trying to reach is not available"
 )
-
-_ALWAYS_ACCEPT_SHORT_WORDS = frozenset({"hello", "hii", "okay", "ok"})
-
-
-def _normalize_short_word(text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", text.lower())
-
-
-def _is_always_accept_short_turn(text: str) -> bool:
-    words = (text or "").split()
-    if len(words) != 1:
-        return False
-    return _normalize_short_word(words[0]) in _ALWAYS_ACCEPT_SHORT_WORDS
 
 
 def _normalize_transcript_for_match(text: str) -> str:
@@ -323,13 +311,19 @@ async def run_media_stream(
             dt.datetime.now(dt.timezone.utc) - waiting_for_user_since
         ).total_seconds()
 
+    def _is_always_accept_short_word(text: str) -> bool:
+        normalized = _normalize_transcript_for_match(text)
+        parts = normalized.split()
+        return len(parts) == 1 and parts[0] in ALWAYS_ACCEPT_SHORT_WORDS
+
     def _should_skip_short_turn(text: str) -> bool:
         """Skip tiny barge-in fragments; accept one-word replies while waiting."""
         nonlocal post_greeting_short_accepts_remaining
         words = len((text or "").split())
         if words == 0:
             return True
-        if _is_always_accept_short_turn(text):
+        # hello / hii / okay / ok are always handled once greeting guard ends.
+        if _is_always_accept_short_word(text) and _barge_in_allowed():
             return False
         # Silence watch armed → user is answering after agent finished.
         # One-word replies ("yes", "haan", "ok") must not be dropped.

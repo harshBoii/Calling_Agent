@@ -166,6 +166,15 @@ POST_GREETING_SHORT_TURNS_TO_ACCEPT = int(
     os.environ.get("POST_GREETING_SHORT_TURNS_TO_ACCEPT", "2")
 )
 BARGE_IN_COOLDOWN_SEC = float(os.environ.get("BARGE_IN_COOLDOWN_SEC", "2.5"))
+# Single-word greetings/acks never skipped after greeting barge-in guard ends.
+ALWAYS_ACCEPT_SHORT_WORDS = frozenset(
+    w.strip().lower()
+    for w in os.environ.get(
+        "ALWAYS_ACCEPT_SHORT_WORDS",
+        "hello,hii,okay,ok",
+    ).split(",")
+    if w.strip()
+)
 
 QUESTIONS_TO_ASK = """
 
