@@ -27,6 +27,7 @@ from config import (
     MIN_WORDS_TO_RESPOND,
     SARVAM_API_KEY,
     GREETING_BARGE_IN_GUARD_SEC,
+    POST_GREETING_SHORT_TURNS_TO_ACCEPT,
     SILENCE_HANGUP_LINE,
     SILENCE_NUDGE_SEC,
     deepgram_ws_url,
@@ -179,6 +180,7 @@ async def run_media_stream(
     silence_timer_task: asyncio.Task | None = None
     silence_handling = False
     greeting_barge_guard_until: dt.datetime | None = None
+    post_greeting_short_accepts_remaining = POST_GREETING_SHORT_TURNS_TO_ACCEPT
     waiting_for_user_since: dt.datetime | None = None
     _last_silence_log_sec = -1
 
@@ -292,6 +294,7 @@ async def run_media_stream(
 
     def _should_skip_short_turn(text: str) -> bool:
         """Skip tiny barge-in fragments; accept one-word replies while waiting."""
+        nonlocal post_greeting_short_accepts_remaining
         words = len((text or "").split())
         if words == 0:
             return True
@@ -299,6 +302,21 @@ async def run_media_stream(
         # One-word replies ("yes", "haan", "ok") must not be dropped.
         # Keep the min-word gate only for barge-in / mid-speech fragments.
         if waiting_for_user_since is not None and not barge_in_event.is_set():
+            return False
+        # After greeting barge-in guard ends, accept the first N short replies
+        # (e.g. "hi", "yes") that would otherwise be dropped as barge-in noise.
+        if (
+            greeting_barge_guard_until is not None
+            and _barge_in_allowed()
+            and words <= MIN_WORDS_TO_RESPOND
+            and post_greeting_short_accepts_remaining > 0
+        ):
+            post_greeting_short_accepts_remaining -= 1
+            print(
+                f"[{call_sid}] ✅ Post-greeting short turn accepted "
+                f"({post_greeting_short_accepts_remaining} remaining)",
+                flush=True,
+            )
             return False
         return words <= MIN_WORDS_TO_RESPOND
 
