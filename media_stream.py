@@ -43,6 +43,19 @@ _VOICEMAIL_PHRASE = (
     "forwarded to voice mail the person you are trying to reach is not available"
 )
 
+_ALWAYS_ACCEPT_SHORT_WORDS = frozenset({"hello", "hii", "okay", "ok"})
+
+
+def _normalize_short_word(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _is_always_accept_short_turn(text: str) -> bool:
+    words = (text or "").split()
+    if len(words) != 1:
+        return False
+    return _normalize_short_word(words[0]) in _ALWAYS_ACCEPT_SHORT_WORDS
+
 
 def _normalize_transcript_for_match(text: str) -> str:
     s = re.sub(r"[^a-z0-9 ]", "", text.lower())
@@ -316,6 +329,8 @@ async def run_media_stream(
         words = len((text or "").split())
         if words == 0:
             return True
+        if _is_always_accept_short_turn(text):
+            return False
         # Silence watch armed → user is answering after agent finished.
         # One-word replies ("yes", "haan", "ok") must not be dropped.
         # Keep the min-word gate only for barge-in / mid-speech fragments.
