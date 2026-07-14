@@ -11,7 +11,7 @@ from config import (
 )
 from email_service import send_resend_email
 from sms import send_telnyx_sms
-from webhook import send_email_completed_webhook, send_sms_completed_webhook
+from webhook import send_email_completed_webhook, send_sms_completed_webhook, send_whatsapp_completed_webhook
 
 
 def msg_cfg_key(task_token: str) -> str:
@@ -72,6 +72,18 @@ async def execute_message_send(cfg: dict) -> tuple[str | None, str, str | None]:
             subject=str(cfg.get("subject") or ""),
             html=str(cfg.get("body") or cfg.get("html") or ""),
             text=cfg.get("text"),
+        )
+    elif channel == "whatsapp":
+        from whatsapp import send_telnyx_whatsapp
+        external_id = await send_telnyx_whatsapp(
+            str(cfg.get("to")),
+            str(cfg.get("message") or cfg.get("body") or ""),
+            from_number=cfg.get("from"),
+            template_name=cfg.get("template_name"),
+            template_language_code=str(cfg.get("template_language") or "en_US"),
+            template_language_policy=str(cfg.get("template_language_policy") or "deterministic"),
+            template_components=cfg.get("template_components"),
+            preview_url=bool(cfg.get("preview_url", False)),
         )
     else:
         return None, "FAILED", f"unknown channel: {channel}"
@@ -152,6 +164,14 @@ async def run_message_job(ctx, task_token: str) -> None:
                 )
             elif channel == "email":
                 await send_email_completed_webhook(
+                    task_token=task_token,
+                    cfg=cfg,
+                    external_id=external_id,
+                    status=webhook_status,
+                    error=error,
+                )
+            elif channel == "whatsapp":
+                await send_whatsapp_completed_webhook(
                     task_token=task_token,
                     cfg=cfg,
                     external_id=external_id,

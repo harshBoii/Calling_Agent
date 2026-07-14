@@ -24,6 +24,10 @@ TELNYX_CONNECTION_ID  = os.environ["TELNYX_CONNECTION_ID"].strip()  # your Telny
 # Optional: required for many long-code / SMS send profiles in Telnyx
 TELNYX_MESSAGING_PROFILE_ID = (os.environ.get("TELNYX_MESSAGING_PROFILE_ID") or "").strip() or None
 
+# ─── WhatsApp (Telnyx) ───────────────────────────────────────────────────────
+# WhatsApp-enabled sender number. Falls back to TELNYX_PHONE_NUMBER if not set.
+TELNYX_WHATSAPP_NUMBER = (os.environ.get("TELNYX_WHATSAPP_NUMBER") or "").strip() or None
+
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 
@@ -52,6 +56,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_CALL = os.environ.get("WEBHOOK_CALL", "").strip()
 WEBHOOK_SMS = os.environ.get("WEBHOOK_SMS", "").strip()
 WEBHOOK_EMAIL = os.environ.get("WEBHOOK_EMAIL", "").strip()
+WEBHOOK_WHATSAPP = os.environ.get("WEBHOOK_WHATSAPP", "").strip()
 
 # ─── STT ──────────────────────────────────────────────────────────────────────
 DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]

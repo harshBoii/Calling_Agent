@@ -18,6 +18,7 @@ from config import (
     WEBHOOK_EMAIL,
     WEBHOOK_SECRET,
     WEBHOOK_SMS,
+    WEBHOOK_WHATSAPP,
 )
 from call_analysis import get_analysis_prompt, parse_analysis_json
 from llm import ask_llm_for_analysis
@@ -348,6 +349,60 @@ async def send_email_completed_webhook(
         error=error,
     )
     await deliver_webhook(WEBHOOK_EMAIL, payload, "email.completed")
+
+
+def build_whatsapp_payload(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> dict:
+    ids = cfg.get("_ids") or {}
+    return {
+        "event": "whatsapp.completed",
+        "eventId": f"evt_{uuid.uuid4().hex}",
+        "occurredAt": _iso(dt.datetime.now(dt.timezone.utc)),
+        "companyId": ids.get("companyId") or cfg.get("companyId"),
+        "leadId": ids.get("leadId") or cfg.get("leadId"),
+        "campaignId": ids.get("campaignId") or cfg.get("campaignId"),
+        "message": {
+            "taskToken": task_token,
+            "externalId": external_id,
+            "from": cfg.get("from"),
+            "to": cfg.get("to"),
+            "body": cfg.get("message") or cfg.get("body"),
+            "templateName": cfg.get("template_name"),
+            "status": status,
+            "messageType": cfg.get("message_type", "campaign"),
+            "provider": "telnyx_whatsapp",
+            "error": error,
+        },
+    }
+
+
+async def send_whatsapp_completed_webhook(
+    *,
+    task_token: str,
+    cfg: dict,
+    external_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if not WEBHOOK_WHATSAPP:
+        print("[WEBHOOK] WEBHOOK_WHATSAPP not set; skipped whatsapp.completed", flush=True)
+        return
+    payload = build_whatsapp_payload(
+        task_token=task_token,
+        cfg=cfg,
+        external_id=external_id,
+        status=status,
+        error=error,
+    )
+    await deliver_webhook(WEBHOOK_WHATSAPP, payload, "whatsapp.completed")
+
+
 
 
 def build_call_status_payload(

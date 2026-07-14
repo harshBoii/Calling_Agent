@@ -24,6 +24,7 @@ from config import (
     ONCALL_QUEUE,
     REDIS_URL,
     TELNYX_PHONE_NUMBER,
+    TELNYX_WHATSAPP_NUMBER,
     USE_ARQ_QUEUE,
     build_call_config,
     build_legacy_system_prompt,
@@ -39,7 +40,7 @@ from message_jobs import (
     set_message_status,
 )
 from schemas.outbound_call import OutboundCallRequest
-from webhook import send_email_completed_webhook, send_sms_completed_webhook
+from webhook import send_email_completed_webhook, send_sms_completed_webhook, send_whatsapp_completed_webhook
 
 arq_pool = None
 redis_client: aioredis.Redis | None = None
@@ -143,6 +144,14 @@ async def _direct_message(payload: dict, message_type: str) -> dict:
             )
         elif channel == "email":
             await send_email_completed_webhook(
+                task_token=task_token,
+                cfg=payload,
+                external_id=external_id,
+                status=webhook_status,
+                error=error,
+            )
+        elif channel == "whatsapp":
+            await send_whatsapp_completed_webhook(
                 task_token=task_token,
                 cfg=payload,
                 external_id=external_id,
@@ -321,6 +330,73 @@ async def email_send(request: Request):
         "subject": subject,
         "body": html_body,
         "text": body.get("text"),
+        "companyId": body.get("companyId"),
+        "leadId": body.get("leadId"),
+        "campaignId": body.get("campaignId"),
+    }
+    if USE_ARQ_QUEUE:
+        return await _enqueue_message(payload, message_type)
+    return await _direct_message(payload, message_type)
+
+
+@app.post("/whatsapp/send")
+async def whatsapp_send(request: Request):
+    """Send WhatsApp message via Telnyx POST /v2/messages/whatsapp.
+
+    JSON body:
+      - to                      (str, +E164, required)
+      - message                 (str, required for text mode; ignored when template_name is set)
+      - from                    (str, +E164, optional — falls back to TELNYX_WHATSAPP_NUMBER)
+      - message_type            ("campaign" | "on_demand", default "campaign")
+      - template_name           (str, optional — enables template mode, no 24h window restriction)
+      - template_language       (str, default "en_US")
+      - template_language_policy (str, default "deterministic")
+      - template_components     (list, optional — variable bindings per Telnyx template spec)
+      - preview_url             (bool, default false — text mode only)
+      - companyId / leadId / campaignId (optional)
+    """
+    body = await request.json()
+    raw_to = body.get("to")
+    template_name = body.get("template_name")
+    raw_message = body.get("message")
+
+    if raw_to is None:
+        raise HTTPException(status_code=400, detail="Missing 'to'")
+    if not template_name and raw_message is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing 'message' (required when not using a template)",
+        )
+
+    to = _normalize_to_e164(str(raw_to))
+    if not to or not _E164_RE.match(to):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'to' must be in +E164 format, e.g. +919876543210 (got {raw_to!r})",
+        )
+
+    message = str(raw_message).strip() if raw_message else ""
+    if not template_name and not message:
+        raise HTTPException(status_code=400, detail="'message' must be non-empty")
+
+    message_type = _parse_message_type(body)
+
+    from_number = body.get("from")
+    if from_number is not None:
+        from_number = _normalize_to_e164(str(from_number))
+        if not _E164_RE.match(from_number):
+            raise HTTPException(status_code=400, detail="'from' must be valid +E164")
+
+    payload = {
+        "channel": "whatsapp",
+        "to": to,
+        "message": message,
+        "from": from_number or TELNYX_WHATSAPP_NUMBER or TELNYX_PHONE_NUMBER,
+        "template_name": template_name,
+        "template_language": body.get("template_language", "en_US"),
+        "template_language_policy": body.get("template_language_policy", "deterministic"),
+        "template_components": body.get("template_components"),
+        "preview_url": bool(body.get("preview_url", False)),
         "companyId": body.get("companyId"),
         "leadId": body.get("leadId"),
         "campaignId": body.get("campaignId"),
@@ -528,4 +604,24 @@ async def media_stream(websocket: WebSocket, cfg_token: str):
 
 @app.post("/webhook")
 async def telnyx_webhook(request: Request):
+    """Receive Telnyx delivery status events for WhatsApp (and other channels).
+
+    Telnyx sends events such as message.sent, message.delivered,
+    message.read, and message.failed to this endpoint via the
+    messaging profile webhook URL configured in the Telnyx Portal.
+    """
+    try:
+        body = await request.json()
+        event_type = (body.get("data") or {}).get("event_type", "unknown")
+        payload = (body.get("data") or {}).get("payload") or {}
+        msg_id = payload.get("id", "?")
+        direction = payload.get("direction", "?")
+        channel_type = payload.get("type", "?")
+        print(
+            f"[TELNYX WEBHOOK] event={event_type} id={msg_id} "
+            f"direction={direction} type={channel_type}",
+            flush=True,
+        )
+    except Exception:
+        pass
     return {"ok": True}
